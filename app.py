@@ -272,16 +272,18 @@ def api_ranking():
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""SELECT game_name, tag_line, summoner_level AS val, NULL::int AS champion_id
                            FROM players WHERE summoner_level IS NOT NULL
-                           ORDER BY summoner_level DESC LIMIT 3""")
+                           ORDER BY summoner_level DESC""")
             level = cur.fetchall()
-            cur.execute("""SELECT p.game_name, p.tag_line, m.points AS val, m.champion_id
+            # 회원별 최고 숙련 챔피언 1개씩 → 파이썬에서 val 내림차순 정렬
+            cur.execute("""SELECT DISTINCT ON (p.id) p.game_name, p.tag_line, m.points AS val, m.champion_id
                            FROM mastery m JOIN players p ON p.id = m.player_id
-                           ORDER BY m.points DESC LIMIT 3""")
+                           ORDER BY p.id, m.points DESC""")
             single = cur.fetchall()
+            single.sort(key=lambda r: r["val"], reverse=True)
             cur.execute("""SELECT p.game_name, p.tag_line, SUM(m.points) AS val, NULL::int AS champion_id
                            FROM mastery m JOIN players p ON p.id = m.player_id
                            GROUP BY p.id, p.game_name, p.tag_line
-                           ORDER BY val DESC LIMIT 3""")
+                           ORDER BY val DESC""")
             total = cur.fetchall()
             cur.execute("""SELECT p.game_name, p.tag_line, COUNT(*) AS val, NULL::int AS champion_id
                            FROM (
@@ -289,11 +291,11 @@ def api_ranking():
                              FROM mastery ORDER BY champion_id, points DESC
                            ) t JOIN players p ON p.id = t.player_id
                            GROUP BY p.id, p.game_name, p.tag_line
-                           ORDER BY val DESC LIMIT 3""")
+                           ORDER BY val DESC""")
             most1st = cur.fetchall()
             cur.execute("""SELECT p.game_name, p.tag_line, m.points AS val, m.champion_id
                            FROM mastery m JOIN players p ON p.id = m.player_id
-                           WHERE m.champion_id = %s ORDER BY m.points DESC LIMIT 3""", (teemo_id,))
+                           WHERE m.champion_id = %s ORDER BY m.points DESC""", (teemo_id,))
             teemo = cur.fetchall()
     finally:
         conn.close()
@@ -543,6 +545,11 @@ PAGE = r"""
   .rk-val small{color:var(--muted);font-weight:400;font-size:11px;margin-left:2px}
   .rk-row.first .rk-name{font-weight:600;color:var(--gold-bright)}
   .rk-row.first .rk-no{color:var(--gold)}
+  .rk-card.expandable{cursor:pointer}
+  .rk-card .rk-row.extra{display:none}
+  .rk-card.open .rk-row.extra{display:flex}
+  .rk-caret{margin-left:auto;color:var(--muted);font-size:12px;transition:transform .15s}
+  .rk-card.open .rk-caret{transform:rotate(180deg)}
 </style></head><body>
 <div class="wrap">
   <div class="eyebrow">League of Legends</div>
@@ -643,15 +650,21 @@ async function loadRanking(){
     VERSION=d.version||VERSION;
     $('#ranking-list').innerHTML=d.rankings.map(cat=>{
       const head=(cat.img&&VERSION)?`<img src="${dd('champion/'+cat.img+'.png')}">`:'';
-      const body=cat.players.length
-        ? cat.players.map((p,i)=>{
+      const players=cat.players||[];
+      const body=players.length
+        ? players.map((p,i)=>{
             const champ=(p.champImg&&VERSION)?`<img class="rk-champ" title="${esc(p.champName)}" src="${dd('champion/'+p.champImg+'.png')}">`:'';
-            return `<div class="rk-row${i===0?' first':''}"><span class="rk-no">${i+1}</span>
+            const cls='rk-row'+(i===0?' first':'')+(i>=3?' extra':'');
+            return `<div class="${cls}"><span class="rk-no">${i+1}</span>
               <span class="rk-name">${esc(p.name)} <span class="muted">#${esc(p.tag)}</span></span>
               ${champ}<span class="rk-val">${p.value.toLocaleString()}<small>${esc(cat.unit)}</small></span></div>`;
           }).join('')
         : '<div class="muted" style="padding:6px 2px">기록 없음</div>';
-      return `<div class="rk-card"><div class="rk-title">${head}${esc(cat.title)}</div>${body}</div>`;
+      const expandable=players.length>3;
+      const caret=expandable?'<span class="rk-caret">▾</span>':'';
+      const cls=expandable?'rk-card expandable':'rk-card';
+      const onclick=expandable?" onclick=\"this.classList.toggle('open')\"":'';
+      return `<div class="${cls}"${onclick}><div class="rk-title">${head}${esc(cat.title)}${caret}</div>${body}</div>`;
     }).join('');
   }catch(e){ $('#ranking-list').innerHTML='<div class="muted" style="text-align:center">불러오기 실패</div>'; }
 }
