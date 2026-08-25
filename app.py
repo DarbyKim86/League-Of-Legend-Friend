@@ -67,13 +67,12 @@ def lookup(game_name, tag_line, count):
     )
     my_puuid = acc["puuid"]
 
-    # 2) 매치 ID (최근 DAYS일 이내, 최대 count개)
-    start_time = int((datetime.now(timezone.utc) - timedelta(days=DAYS)).timestamp())
+    # 2) 매치 ID (날짜 제한 없이 최근 count개)
     ids, start = [], 0
     while len(ids) < count:
         batch = riot_get(
             f"{BASE}/lol/match/v5/matches/by-puuid/{my_puuid}/ids",
-            {"startTime": start_time, "start": start, "count": min(100, count - len(ids))},
+            {"start": start, "count": min(100, count - len(ids))},
         )
         if not batch:
             break
@@ -144,6 +143,48 @@ def api_lookup():
         return jsonify({"error": f"Riot API 오류 (HTTP {code})"}), 502
     except requests.RequestException:
         return jsonify({"error": "네트워크 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."}), 502
+
+
+@app.route("/api/debug")
+def api_debug():
+    """각 단계가 실제로 뭘 반환하는지 그대로 보여주는 진단용 엔드포인트."""
+    raw = (request.args.get("riotId") or "").strip()
+    if "#" in raw:
+        game_name, tag_line = raw.rsplit("#", 1)
+    else:
+        game_name, tag_line = raw, "KR1"
+    game_name, tag_line = game_name.strip(), tag_line.strip()
+
+    out = {
+        "key_set": bool(API_KEY.strip()),
+        "routing": ROUTING,
+        "input": {"gameName": game_name, "tagLine": tag_line},
+    }
+    try:
+        acc = riot_get(
+            f"{BASE}/riot/account/v1/accounts/by-riot-id/{quote(game_name)}/{quote(tag_line)}"
+        )
+        out["account_ok"] = True
+        out["account"] = {
+            "gameName": acc.get("gameName"),
+            "tagLine": acc.get("tagLine"),
+            "puuid_len": len(acc.get("puuid", "")),
+        }
+        mids = riot_get(
+            f"{BASE}/lol/match/v5/matches/by-puuid/{acc['puuid']}/ids",
+            {"start": 0, "count": 5},
+        )
+        out["match_ids_count"] = len(mids)
+        out["match_ids_sample"] = mids
+    except requests.HTTPError as e:
+        out["error"] = {
+            "status": e.response.status_code,
+            "url": e.response.url,
+            "body": e.response.text[:300],
+        }
+    except requests.RequestException as e:
+        out["error"] = {"exception": str(e)}
+    return jsonify(out)
 
 
 PAGE = r"""
