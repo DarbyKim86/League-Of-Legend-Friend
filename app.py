@@ -34,6 +34,7 @@ DEFAULT_KEY = ""        # 여기에 직접 넣지 말고 환경변수 RIOT_API_K
 ROUTING = "asia"        # 한국 계정: asia
 DAYS = 30               # 며칠 이내 매치까지 볼지
 SLEEP = 1.2             # Riot 요청 사이 대기(초). 레이트 리밋 여유용
+MIN_COUNT = 2           # 이 횟수 미만(=1회 등장)은 제외. 랜덤 매칭으로 스친 사람 걸러냄
 # ===============================================
 
 API_KEY = os.environ.get("RIOT_API_KEY", DEFAULT_KEY)
@@ -107,6 +108,7 @@ def lookup(game_name, tag_line, count):
     people = [
         {"name": names[pu], "total": s["total"], "ally": s["ally"], "enemy": s["enemy"]}
         for pu, s in stats.items()
+        if s["total"] >= MIN_COUNT
     ]
     people.sort(key=lambda x: x["total"], reverse=True)
     return {"me": riot_id_of(acc) if acc.get("riotIdGameName") else f"{game_name}#{tag_line}",
