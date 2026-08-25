@@ -318,24 +318,38 @@ def admin_refresh():
         conn.close()
 
     result = {"updated": 0, "failed": 0}
+    errors = []
     lock = threading.Lock()
 
     def work(p):
-        c = get_db()
+        try:
+            c = get_db()
+        except Exception as e:
+            with lock:
+                result["failed"] += 1
+                if len(errors) < 3:
+                    errors.append(f"DB연결: {type(e).__name__}: {e}")
+            return
         try:
             store_player(c, p["id"], p["puuid"])
             with lock:
                 result["updated"] += 1
-        except Exception:
+        except Exception as e:
+            print("refresh error:", repr(e))
             with lock:
                 result["failed"] += 1
+                if len(errors) < 3:
+                    errors.append(f"{type(e).__name__}: {e}")
         finally:
-            c.close()
+            try:
+                c.close()
+            except Exception:
+                pass
 
     if players:
         with ThreadPoolExecutor(max_workers=WORKERS) as ex:
             list(ex.map(work, players))
-    return jsonify({"ok": True, **result})
+    return jsonify({"ok": True, **result, "errors": errors})
 
 
 # ---------- 페이지 ----------
@@ -548,7 +562,11 @@ async function refreshAll(){
   try{
     const r=await fetch('/api/admin/refresh',{method:'POST'}); const d=await r.json();
     if(!r.ok){ $('#msg').innerHTML=`<div class="err">${esc(d.error||'오류')}</div>`; }
-    else{ $('#msg').innerHTML=`<div class="ok">${d.updated}명 갱신 완료${d.failed?`, ${d.failed}명 실패`:''}</div>`; loadList(); }
+    else{
+      let m=`<div class="ok">${d.updated}명 갱신 완료${d.failed?`, ${d.failed}명 실패`:''}</div>`;
+      if(d.errors&&d.errors.length){ m+=`<div class="err">사유: ${esc(d.errors.join(' | '))}</div>`; }
+      $('#msg').innerHTML=m; loadList();
+    }
   }catch(e){ $('#msg').innerHTML='<div class="err">갱신 요청 실패</div>'; }
   finally{ btn.disabled=false; }
 }
