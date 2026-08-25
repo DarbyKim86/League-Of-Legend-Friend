@@ -1,12 +1,16 @@
 services:
   - type: web
-    name: lol-friends
+    name: lol-roster
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    # timeout을 넉넉히 줘야 함: 조회 한 번이 수십 초 걸려서
-    # gunicorn 기본값(30초)이면 중간에 워커가 죽어 요청이 실패함.
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120
     envVars:
       - key: RIOT_API_KEY
-        sync: false   # 값은 레포에 넣지 않고 Render 대시보드에서 직접 입력
+        sync: false   # 라이엇 API 키
+      - key: DATABASE_URL
+        sync: false   # Supabase Postgres 연결 문자열 (끝에 ?sslmode=require 권장)
+      - key: ADMIN_PASSWORD
+        sync: false   # 관리자 비밀번호 (직접 정함)
+      - key: SECRET_KEY
+        sync: false   # 세션 서명용 아무 랜덤 문자열
