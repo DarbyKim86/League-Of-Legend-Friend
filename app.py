@@ -117,11 +117,18 @@ def fetch_player_store(puuid):
     }
 
 
-def store_player(conn, player_id, puuid):
+def store_player(conn, player_id, game_name, tag_line):
+    # puuid는 API 키마다 다르게 암호화되므로, 저장된 것 대신
+    # 이름으로 지금 키 기준의 puuid를 다시 받아온다.
+    acc = riot_get(REGION_HOST,
+                   f"/riot/account/v1/accounts/by-riot-id/{quote(game_name)}/{quote(tag_line)}")
+    puuid = acc["puuid"]
     data = fetch_player_store(puuid)
     with conn.cursor() as cur:
-        cur.execute("UPDATE players SET summoner_level=%s, profile_icon_id=%s, updated_at=now() WHERE id=%s",
-                    (data["level"], data["iconId"], player_id))
+        cur.execute("""UPDATE players
+                       SET puuid=%s, summoner_level=%s, profile_icon_id=%s, updated_at=now()
+                       WHERE id=%s""",
+                    (puuid, data["level"], data["iconId"], player_id))
         cur.execute("DELETE FROM mastery WHERE player_id=%s", (player_id,))
         if data["mastery"]:
             execute_values(cur,
@@ -163,18 +170,40 @@ def admin_required(fn):
 # ---------- 공개 API (DB만 읽음) ----------
 @app.route("/api/members")
 def api_members():
-    ver = safe_ddragon()["version"]
+    dd = safe_ddragon()
+    ver = dd["version"]
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""SELECT game_name, tag_line, summoner_level, profile_icon_id, updated_at
+            cur.execute("""SELECT id, game_name, tag_line, summoner_level, profile_icon_id, updated_at
                            FROM players
                            ORDER BY summoner_level DESC NULLS LAST, added_at""")
             rows = cur.fetchall()
+            cur.execute("""
+                SELECT player_id, champion_id FROM (
+                    SELECT player_id, champion_id,
+                           ROW_NUMBER() OVER (PARTITION BY player_id ORDER BY points DESC) AS rn
+                    FROM mastery
+                ) t WHERE rn <= 5 ORDER BY player_id, rn
+            """)
+            top_rows = cur.fetchall()
     finally:
         conn.close()
-    members = [{"name": r["game_name"], "tag": r["tag_line"],
-                "level": r["summoner_level"], "iconId": r["profile_icon_id"]} for r in rows]
+
+    top_by_player = {}
+    for r in top_rows:
+        top_by_player.setdefault(r["player_id"], []).append(r["champion_id"])
+
+    members = []
+    for r in rows:
+        champs = []
+        for cid in top_by_player.get(r["id"], []):
+            info = dd["champions"].get(cid)
+            champs.append({"name": info["name"] if info else str(cid),
+                           "img": info["id"] if info else None})
+        members.append({"name": r["game_name"], "tag": r["tag_line"],
+                        "level": r["summoner_level"], "iconId": r["profile_icon_id"],
+                        "topMastery": champs})
     last = max([r["updated_at"] for r in rows if r["updated_at"]], default=None)
     return jsonify({"version": ver, "members": members,
                     "updatedAt": last.isoformat() if last else None})
@@ -208,6 +237,29 @@ def api_champion_top():
     out.sort(key=lambda x: (0 if x["top"] else 1,
                             -(x["top"]["points"] if x["top"] else 0), x["name"]))
     return jsonify({"version": dd["version"], "champions": out})
+
+
+@app.route("/api/champion-detail")
+def api_champion_detail():
+    cid = request.args.get("championId", type=int)
+    if not cid:
+        return jsonify({"error": "championId가 필요합니다."}), 400
+    dd = safe_ddragon()
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""SELECT p.game_name, p.tag_line, m.points, m.level
+                           FROM mastery m JOIN players p ON p.id = m.player_id
+                           WHERE m.champion_id = %s
+                           ORDER BY m.points DESC""", (cid,))
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    champ = dd["champions"].get(cid, {})
+    players = [{"name": r["game_name"], "tag": r["tag_line"],
+                "points": r["points"], "level": r["level"]} for r in rows]
+    return jsonify({"champion": champ.get("name"), "img": champ.get("id"),
+                    "version": dd["version"], "players": players})
 
 
 # ---------- 관리자 API ----------
@@ -283,7 +335,7 @@ def admin_add():
         try:
             c = get_db()
             try:
-                store_player(c, new_id, puuid)
+                store_player(c, new_id, real_name, real_tag)
             finally:
                 c.close()
         except Exception:
@@ -312,7 +364,7 @@ def admin_refresh():
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id, puuid FROM players")
+            cur.execute("SELECT id, game_name, tag_line, puuid FROM players")
             players = cur.fetchall()
     finally:
         conn.close()
@@ -331,7 +383,7 @@ def admin_refresh():
                     errors.append(f"DB연결: {type(e).__name__}: {e}")
             return
         try:
-            store_player(c, p["id"], p["puuid"])
+            store_player(c, p["id"], p["game_name"], p["tag_line"])
             with lock:
                 result["updated"] += 1
         except Exception as e:
@@ -412,6 +464,14 @@ PAGE = r"""
   #search{width:100%;margin-bottom:12px}
   .muted{color:var(--muted)}
   #status{color:var(--muted);text-align:center;padding:24px}
+  .mini{display:flex;gap:4px;margin-top:5px}
+  .mini img{width:22px;height:22px;border-radius:5px;border:1px solid var(--line)}
+  .clickable{cursor:pointer}
+  .clickable:hover{border-color:var(--gold)}
+  .back{background:transparent;border:1px solid var(--line);color:var(--muted);padding:8px 14px}
+  .back:hover{background:var(--surface2);color:var(--text)}
+  .bar-champ{display:flex;align-items:center;gap:10px;margin:12px 2px 16px}
+  .bar-champ img{width:46px;height:46px;border-radius:9px;border:1px solid var(--line)}
 </style></head><body>
 <div class="wrap">
   <div class="eyebrow">League of Legends</div>
@@ -427,8 +487,11 @@ PAGE = r"""
   <div id="view-members"><div id="status">불러오는 중…</div><div id="member-list"></div></div>
 
   <div id="view-mastery" style="display:none">
-    <input id="search" placeholder="챔피언 이름 검색…" autocomplete="off">
-    <div id="champ-list"><div class="muted" style="text-align:center;padding:16px">불러오는 중…</div></div>
+    <div id="champ-browse">
+      <input id="search" placeholder="챔피언 이름 검색…" autocomplete="off">
+      <div id="champ-list"><div class="muted" style="text-align:center;padding:16px">불러오는 중…</div></div>
+    </div>
+    <div id="champ-detail" style="display:none"></div>
   </div>
 </div>
 
@@ -446,8 +509,10 @@ async function loadMembers(){
     if(!d.members.length){ $('#member-list').innerHTML='<div class="muted" style="text-align:center;padding:24px">등록된 회원이 없습니다.</div>'; return; }
     $('#member-list').innerHTML=d.members.map((m,i)=>{
       const icon=(VERSION&&m.iconId!=null)?`<img class="icon" src="${dd('profileicon/'+m.iconId+'.png')}">`:`<div class="icon"></div>`;
+      const mini=(VERSION&&m.topMastery&&m.topMastery.length)
+        ? `<div class="mini">${m.topMastery.map(c=>c.img?`<img title="${esc(c.name)}" src="${dd('champion/'+c.img+'.png')}">`:'').join('')}</div>` : '';
       return `<div class="row"><div class="no">${i+1}</div>${icon}
-        <div class="who"><div class="nm">${esc(m.name)} <span class="sm">#${esc(m.tag)}</span></div></div>
+        <div class="who"><div class="nm">${esc(m.name)} <span class="sm">#${esc(m.tag)}</span></div>${mini}</div>
         <div class="lvl">${m.level??'-'} <small>레벨</small></div></div>`;
     }).join('');
   }catch(e){ $('#status').textContent='불러오기 실패'; }
@@ -462,9 +527,30 @@ function renderChamps(filter){
     const top=c.top
       ? `<div class="who"><div class="top-who">${esc(c.top.name)} <span class="muted">#${esc(c.top.tag)}</span></div></div><div class="lvl"><span class="pts">${c.top.points.toLocaleString()}</span> <small>점</small></div>`
       : `<div class="who"><span class="norec">기록 없음</span></div>`;
-    return `<div class="row">${icon}<div style="min-width:90px"><span class="champ-nm">${esc(c.name)}</span></div>${top}</div>`;
+    return `<div class="row clickable" onclick="showChampDetail(${c.championId})">${icon}<div style="min-width:90px"><span class="champ-nm">${esc(c.name)}</span></div>${top}</div>`;
   }).join('');
 }
+
+async function showChampDetail(cid){
+  const c=CHAMPS.find(x=>x.championId===cid);
+  $('#champ-browse').style.display='none';
+  $('#champ-detail').style.display='';
+  $('#champ-detail').innerHTML='<div class="muted" style="text-align:center;padding:16px">불러오는 중…</div>';
+  try{
+    const r=await fetch('/api/champion-detail?championId='+cid);
+    const d=await r.json();
+    const img=(c&&c.img)||d.img;
+    let h=`<button class="back" onclick="backToList()">← 목록으로</button>`;
+    h+=`<div class="bar-champ">${VERSION?`<img src="${dd('champion/'+img+'.png')}">`:''}<div><b>${esc(d.champion||(c&&c.name))}</b> 숙련도 순위</div></div>`;
+    if(!d.players.length){ h+='<div class="muted" style="text-align:center;padding:12px">이 챔피언 숙련도 기록이 있는 회원이 없습니다.</div>'; }
+    else{ h+=d.players.map((p,i)=>`<div class="row"><div class="no">${i+1}</div>
+      <div class="who"><div class="nm">${esc(p.name)} <span class="muted">#${esc(p.tag)}</span></div>
+        <div class="sm">숙련도 ${p.level}레벨</div></div>
+      <div class="lvl"><span class="pts">${p.points.toLocaleString()}</span> <small>점</small></div></div>`).join(''); }
+    $('#champ-detail').innerHTML=h;
+  }catch(e){ $('#champ-detail').innerHTML='<button class="back" onclick="backToList()">← 목록으로</button><div class="muted" style="text-align:center;padding:16px">불러오기 실패</div>'; }
+}
+function backToList(){ $('#champ-detail').style.display='none'; $('#champ-browse').style.display=''; }
 
 async function loadChamps(){
   try{
@@ -478,6 +564,7 @@ $('#search').addEventListener('input', e=>renderChamps(e.target.value));
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on')); t.classList.add('on');
   const m=t.dataset.tab==='mastery';
+  backToList();
   $('#view-members').style.display=m?'none':''; $('#view-mastery').style.display=m?'':'none';
 }));
 
