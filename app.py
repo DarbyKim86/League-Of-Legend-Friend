@@ -24,12 +24,13 @@ import os
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import requests
 from flask import Flask, jsonify, render_template_string, request
 
 # ===================== 설정 =====================
-DEFAULT_KEY = "RGAPI-여기에-키-넣어도-됨"   # 환경변수 RIOT_API_KEY 가 우선
+DEFAULT_KEY = ""        # 여기에 직접 넣지 말고 환경변수 RIOT_API_KEY 로 지정할 것
 ROUTING = "asia"        # 한국 계정: asia
 DAYS = 30               # 며칠 이내 매치까지 볼지
 SLEEP = 1.2             # Riot 요청 사이 대기(초). 레이트 리밋 여유용
@@ -61,7 +62,9 @@ def riot_id_of(p):
 def lookup(game_name, tag_line, count):
     """이름/태그로 최근 count개 매치를 훑어 함께한 사람 집계."""
     # 1) PUUID
-    acc = riot_get(f"{BASE}/riot/account/v1/accounts/by-riot-id/{game_name}/{tag_line}")
+    acc = riot_get(
+        f"{BASE}/riot/account/v1/accounts/by-riot-id/{quote(game_name)}/{quote(tag_line)}"
+    )
     my_puuid = acc["puuid"]
 
     # 2) 매치 ID (최근 DAYS일 이내, 최대 count개)
@@ -113,6 +116,9 @@ def lookup(game_name, tag_line, count):
 
 @app.route("/api/lookup")
 def api_lookup():
+    if not API_KEY.strip():
+        return jsonify({"error": "서버에 RIOT_API_KEY가 설정되지 않았습니다. 호스팅 환경변수를 확인해 주세요."}), 500
+
     raw = (request.args.get("riotId") or "").strip()
     if not raw:
         return jsonify({"error": "라이엇 ID를 입력해 주세요."}), 400
