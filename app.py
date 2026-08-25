@@ -262,6 +262,65 @@ def api_champion_detail():
                     "version": dd["version"], "players": players})
 
 
+@app.route("/api/ranking")
+def api_ranking():
+    dd = safe_ddragon()
+    teemo_id = next((cid for cid, info in dd["champions"].items() if info["name"] == "티모"), 17)
+
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""SELECT game_name, tag_line, summoner_level AS val, NULL::int AS champion_id
+                           FROM players WHERE summoner_level IS NOT NULL
+                           ORDER BY summoner_level DESC LIMIT 3""")
+            level = cur.fetchall()
+            cur.execute("""SELECT p.game_name, p.tag_line, m.points AS val, m.champion_id
+                           FROM mastery m JOIN players p ON p.id = m.player_id
+                           ORDER BY m.points DESC LIMIT 3""")
+            single = cur.fetchall()
+            cur.execute("""SELECT p.game_name, p.tag_line, SUM(m.points) AS val, NULL::int AS champion_id
+                           FROM mastery m JOIN players p ON p.id = m.player_id
+                           GROUP BY p.id, p.game_name, p.tag_line
+                           ORDER BY val DESC LIMIT 3""")
+            total = cur.fetchall()
+            cur.execute("""SELECT p.game_name, p.tag_line, COUNT(*) AS val, NULL::int AS champion_id
+                           FROM (
+                             SELECT DISTINCT ON (champion_id) champion_id, player_id
+                             FROM mastery ORDER BY champion_id, points DESC
+                           ) t JOIN players p ON p.id = t.player_id
+                           GROUP BY p.id, p.game_name, p.tag_line
+                           ORDER BY val DESC LIMIT 3""")
+            most1st = cur.fetchall()
+            cur.execute("""SELECT p.game_name, p.tag_line, m.points AS val, m.champion_id
+                           FROM mastery m JOIN players p ON p.id = m.player_id
+                           WHERE m.champion_id = %s ORDER BY m.points DESC LIMIT 3""", (teemo_id,))
+            teemo = cur.fetchall()
+    finally:
+        conn.close()
+
+    def simp(rows, with_champ=False):
+        out = []
+        for r in rows:
+            e = {"name": r["game_name"], "tag": r["tag_line"], "value": int(r["val"])}
+            if with_champ and r.get("champion_id") is not None:
+                info = dd["champions"].get(r["champion_id"])
+                if info:
+                    e["champName"] = info["name"]
+                    e["champImg"] = info["id"]
+            out.append(e)
+        return out
+
+    rankings = [
+        {"key": "level", "title": "최고 레벨", "unit": "레벨", "players": simp(level)},
+        {"key": "single", "title": "단일 챔피언 최고 숙련", "unit": "점", "players": simp(single, True)},
+        {"key": "total", "title": "숙련도 총합", "unit": "점", "players": simp(total)},
+        {"key": "most1st", "title": "챔피언 1등 최다", "unit": "개", "players": simp(most1st)},
+        {"key": "teemo", "title": "귀여운 티모 숙련도 1등", "unit": "점",
+         "players": simp(teemo), "img": dd["champions"].get(teemo_id, {}).get("id")},
+    ]
+    return jsonify({"version": dd["version"], "rankings": rankings})
+
+
 # ---------- 관리자 API ----------
 @app.route("/admin/login", methods=["POST"])
 def admin_login():
@@ -472,6 +531,18 @@ PAGE = r"""
   .back:hover{background:var(--surface2);color:var(--text)}
   .bar-champ{display:flex;align-items:center;gap:10px;margin:12px 2px 16px}
   .bar-champ img{width:46px;height:46px;border-radius:9px;border:1px solid var(--line)}
+  .rk-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}
+  .rk-title{font-family:'Marcellus',serif;font-size:17px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .rk-title img{width:24px;height:24px;border-radius:6px;border:1px solid var(--line)}
+  .rk-row{display:flex;align-items:center;gap:10px;padding:6px 0;border-top:1px solid var(--line)}
+  .rk-row:first-of-type{border-top:none}
+  .rk-no{font-family:'JetBrains Mono',monospace;color:var(--muted);width:18px;text-align:center}
+  .rk-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rk-champ{width:22px;height:22px;border-radius:5px;border:1px solid var(--line)}
+  .rk-val{font-family:'JetBrains Mono',monospace;color:var(--gold-bright)}
+  .rk-val small{color:var(--muted);font-weight:400;font-size:11px;margin-left:2px}
+  .rk-row.first .rk-name{font-weight:600;color:var(--gold-bright)}
+  .rk-row.first .rk-no{color:var(--gold)}
 </style></head><body>
 <div class="wrap">
   <div class="eyebrow">League of Legends</div>
@@ -481,6 +552,7 @@ PAGE = r"""
   <div class="tabs">
     <div class="tab on" data-tab="members">회원 리스트</div>
     <div class="tab" data-tab="mastery">챔피언 숙련도</div>
+    <div class="tab" data-tab="ranking">랭킹</div>
   </div>
   <div class="updated" id="updated"></div>
 
@@ -492,6 +564,10 @@ PAGE = r"""
       <div id="champ-list"><div class="muted" style="text-align:center;padding:16px">불러오는 중…</div></div>
     </div>
     <div id="champ-detail" style="display:none"></div>
+  </div>
+
+  <div id="view-ranking" style="display:none">
+    <div id="ranking-list"><div class="muted" style="text-align:center;padding:16px">불러오는 중…</div></div>
   </div>
 </div>
 
@@ -560,12 +636,35 @@ async function loadChamps(){
   }catch(e){ $('#champ-list').innerHTML='<div class="muted" style="text-align:center">불러오기 실패</div>'; }
 }
 
+let RANK_LOADED=false;
+async function loadRanking(){
+  try{
+    const r=await fetch('/api/ranking'); const d=await r.json();
+    VERSION=d.version||VERSION;
+    $('#ranking-list').innerHTML=d.rankings.map(cat=>{
+      const head=(cat.img&&VERSION)?`<img src="${dd('champion/'+cat.img+'.png')}">`:'';
+      const body=cat.players.length
+        ? cat.players.map((p,i)=>{
+            const champ=(p.champImg&&VERSION)?`<img class="rk-champ" title="${esc(p.champName)}" src="${dd('champion/'+p.champImg+'.png')}">`:'';
+            return `<div class="rk-row${i===0?' first':''}"><span class="rk-no">${i+1}</span>
+              <span class="rk-name">${esc(p.name)} <span class="muted">#${esc(p.tag)}</span></span>
+              ${champ}<span class="rk-val">${p.value.toLocaleString()}<small>${esc(cat.unit)}</small></span></div>`;
+          }).join('')
+        : '<div class="muted" style="padding:6px 2px">기록 없음</div>';
+      return `<div class="rk-card"><div class="rk-title">${head}${esc(cat.title)}</div>${body}</div>`;
+    }).join('');
+  }catch(e){ $('#ranking-list').innerHTML='<div class="muted" style="text-align:center">불러오기 실패</div>'; }
+}
+
 $('#search').addEventListener('input', e=>renderChamps(e.target.value));
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on')); t.classList.add('on');
-  const m=t.dataset.tab==='mastery';
   backToList();
-  $('#view-members').style.display=m?'none':''; $('#view-mastery').style.display=m?'':'none';
+  const tab=t.dataset.tab;
+  $('#view-members').style.display = tab==='members'?'':'none';
+  $('#view-mastery').style.display = tab==='mastery'?'':'none';
+  $('#view-ranking').style.display = tab==='ranking'?'':'none';
+  if(tab==='ranking' && !RANK_LOADED){ RANK_LOADED=true; loadRanking(); }
 }));
 
 loadMembers(); loadChamps();
