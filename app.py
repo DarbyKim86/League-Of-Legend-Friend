@@ -712,6 +712,8 @@ async function showMemberDetail(pid){
   }catch(e){ $('#member-detail').innerHTML='<button class="back" onclick="backToMembers()">← 목록으로</button><div class="muted" style="text-align:center;padding:16px">불러오기 실패</div>'; }
 }
 function backToMembers(){ $('#member-detail').style.display='none'; $('#member-browse').style.display=''; }
+
+function renderChamps(filter){
   const f=(filter||'').trim();
   const list=f?CHAMPS.filter(c=>c.name.includes(f)):CHAMPS;
   if(!list.length){ $('#champ-list').innerHTML='<div class="muted" style="text-align:center;padding:16px">해당 챔피언이 없습니다.</div>'; return; }
