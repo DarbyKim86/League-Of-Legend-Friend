@@ -704,7 +704,7 @@ PAGE = r"""
   .opgg{align-self:center;background:transparent;border:1px solid var(--blue);color:var(--blue);
         border-radius:9px;padding:8px 14px;font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap}
   .opgg:hover{background:var(--blue);color:#fff}
-  .reqbox{display:flex;gap:8px;margin:-8px 0 6px}
+  .reqbox{display:flex;gap:8px;margin:18px 0 6px}
   .reqbox input{flex:1}
   .reqmsg{color:var(--muted);font-size:12.5px;margin:0 2px 18px;min-height:16px}
   .rk-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}
