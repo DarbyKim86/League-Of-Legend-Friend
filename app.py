@@ -256,12 +256,13 @@ def api_member(pid):
                        "img": info["id"] if info else None,
                        "points": m["points"], "level": m["level"]})
         total += m["points"]
+    opgg = "https://www.op.gg/summoners/kr/" + quote(f"{p['game_name']}-{p['tag_line']}")
     return jsonify({
         "version": dd["version"], "name": p["game_name"], "tag": p["tag_line"],
         "level": p["summoner_level"], "iconId": p["profile_icon_id"],
         "total": total, "champCount": len(champs),
         "updatedAt": p["updated_at"].isoformat() if p["updated_at"] else None,
-        "champions": champs,
+        "opgg": opgg, "champions": champs,
     })
 
 
@@ -613,6 +614,9 @@ PAGE = r"""
   .stat{flex:1;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px;text-align:center}
   .s-val{font-family:'JetBrains Mono',monospace;color:var(--gold-bright);font-size:18px}
   .s-lab{color:var(--muted);font-size:12px;margin-top:2px}
+  .opgg{align-self:center;background:transparent;border:1px solid var(--blue);color:var(--blue);
+        border-radius:9px;padding:8px 14px;font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap}
+  .opgg:hover{background:var(--blue);color:#fff}
   .rk-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}
   .rk-title{font-family:'Marcellus',serif;font-size:17px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
   .rk-title img{width:24px;height:24px;border-radius:6px;border:1px solid var(--line)}
@@ -695,7 +699,9 @@ async function showMemberDetail(pid){
     VERSION=d.version||VERSION;
     const icon=(VERSION&&d.iconId!=null)?`<img src="${dd('profileicon/'+d.iconId+'.png')}">`:'';
     let h=`<button class="back" onclick="backToMembers()">← 목록으로</button>`;
-    h+=`<div class="bar-champ">${icon}<div><b>${esc(d.name)}</b> <span class="muted">#${esc(d.tag)}</span><div class="muted" style="font-size:13px">Lv.${d.level??'-'}</div></div></div>`;
+    h+=`<div class="bar-champ">${icon}<div style="flex:1"><b>${esc(d.name)}</b> <span class="muted">#${esc(d.tag)}</span><div class="muted" style="font-size:13px">Lv.${d.level??'-'}</div></div>`;
+    if(d.opgg){ h+=`<a class="opgg" href="${d.opgg}" target="_blank" rel="noopener">op.gg ↗</a>`; }
+    h+=`</div>`;
     h+=`<div class="stats">
         <div class="stat"><div class="s-val">${d.total.toLocaleString()}</div><div class="s-lab">총 숙련도</div></div>
         <div class="stat"><div class="s-val">${d.champCount}</div><div class="s-lab">보유 챔피언</div></div>
