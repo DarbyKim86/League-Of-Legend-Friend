@@ -44,6 +44,11 @@ app.secret_key = SECRET_KEY
 
 _ddragon = {"ts": 0, "version": None, "champions": {}}
 
+# 갱신 진행 상태(백그라운드) — gunicorn은 --workers 1 로 실행해야 상태가 일관됨
+REFRESH = {"running": False, "updated": 0, "failed": 0, "total": 0,
+           "errors": [], "finished_at": None}
+REFRESH_LOCK = threading.Lock()
+
 
 # ---------- DB ----------
 def get_db():
@@ -93,11 +98,11 @@ except Exception as e:
 
 # ---------- Riot ----------
 def riot_get(host, path, params=None):
-    for _ in range(3):
+    for _ in range(5):
         r = requests.get(host + path, headers={"X-Riot-Token": RIOT_API_KEY},
-                         params=params, timeout=(5, 10))
+                         params=params, timeout=(5, 12))
         if r.status_code == 429:
-            time.sleep(min(int(r.headers.get("Retry-After", 3)), 5))
+            time.sleep(min(int(r.headers.get("Retry-After", 3)), 60))
             continue
         r.raise_for_status()
         return r.json()
@@ -117,18 +122,27 @@ def fetch_player_store(puuid):
     }
 
 
-def store_player(conn, player_id, game_name, tag_line):
-    # puuid는 API 키마다 다르게 암호화되므로, 저장된 것 대신
-    # 이름으로 지금 키 기준의 puuid를 다시 받아온다.
-    acc = riot_get(REGION_HOST,
-                   f"/riot/account/v1/accounts/by-riot-id/{quote(game_name)}/{quote(tag_line)}")
-    puuid = acc["puuid"]
-    data = fetch_player_store(puuid)
+def store_player(conn, player_id, game_name, tag_line, puuid=None):
+    # 저장된 puuid를 먼저 사용. 키가 바뀌어 400이 나면 이름으로 다시 받아온다.
+    data = None
+    used = puuid
+    if puuid:
+        try:
+            data = fetch_player_store(puuid)
+        except requests.HTTPError as e:
+            if not (e.response is not None and e.response.status_code == 400):
+                raise
+            data = None
+    if data is None:
+        acc = riot_get(REGION_HOST,
+                       f"/riot/account/v1/accounts/by-riot-id/{quote(game_name)}/{quote(tag_line)}")
+        used = acc["puuid"]
+        data = fetch_player_store(used)
     with conn.cursor() as cur:
         cur.execute("""UPDATE players
                        SET puuid=%s, summoner_level=%s, profile_icon_id=%s, updated_at=now()
                        WHERE id=%s""",
-                    (puuid, data["level"], data["iconId"], player_id))
+                    (used, data["level"], data["iconId"], player_id))
         cur.execute("DELETE FROM mastery WHERE player_id=%s", (player_id,))
         if data["mastery"]:
             execute_values(cur,
@@ -396,7 +410,7 @@ def admin_add():
         try:
             c = get_db()
             try:
-                store_player(c, new_id, real_name, real_tag)
+                store_player(c, new_id, real_name, real_tag, puuid)
             finally:
                 c.close()
         except Exception:
@@ -417,52 +431,70 @@ def admin_remove():
     return jsonify({"ok": True})
 
 
+def do_refresh():
+    try:
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT id, game_name, tag_line, puuid FROM players")
+                players = cur.fetchall()
+        finally:
+            conn.close()
+        with REFRESH_LOCK:
+            REFRESH["total"] = len(players)
+
+        def work(p):
+            try:
+                c = get_db()
+            except Exception as e:
+                with REFRESH_LOCK:
+                    REFRESH["failed"] += 1
+                    if len(REFRESH["errors"]) < 3:
+                        REFRESH["errors"].append(f"DB연결: {e}")
+                return
+            try:
+                store_player(c, p["id"], p["game_name"], p["tag_line"], p["puuid"])
+                with REFRESH_LOCK:
+                    REFRESH["updated"] += 1
+            except Exception as e:
+                print("refresh error:", repr(e))
+                with REFRESH_LOCK:
+                    REFRESH["failed"] += 1
+                    if len(REFRESH["errors"]) < 3:
+                        REFRESH["errors"].append(f"{type(e).__name__}: {e}")
+            finally:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+
+        if players:
+            with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+                list(ex.map(work, players))
+    finally:
+        with REFRESH_LOCK:
+            REFRESH["running"] = False
+            REFRESH["finished_at"] = time.time()
+
+
 @app.route("/api/admin/refresh", methods=["POST"])
 @admin_required
 def admin_refresh():
     if not RIOT_API_KEY:
         return jsonify({"error": "서버에 RIOT_API_KEY가 없습니다."}), 500
-    conn = get_db()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id, game_name, tag_line, puuid FROM players")
-            players = cur.fetchall()
-    finally:
-        conn.close()
+    with REFRESH_LOCK:
+        if REFRESH["running"]:
+            return jsonify({"ok": True, "already": True})
+        REFRESH.update(running=True, updated=0, failed=0, total=0, errors=[], finished_at=None)
+    threading.Thread(target=do_refresh, daemon=True).start()
+    return jsonify({"ok": True, "started": True})
 
-    result = {"updated": 0, "failed": 0}
-    errors = []
-    lock = threading.Lock()
 
-    def work(p):
-        try:
-            c = get_db()
-        except Exception as e:
-            with lock:
-                result["failed"] += 1
-                if len(errors) < 3:
-                    errors.append(f"DB연결: {type(e).__name__}: {e}")
-            return
-        try:
-            store_player(c, p["id"], p["game_name"], p["tag_line"])
-            with lock:
-                result["updated"] += 1
-        except Exception as e:
-            print("refresh error:", repr(e))
-            with lock:
-                result["failed"] += 1
-                if len(errors) < 3:
-                    errors.append(f"{type(e).__name__}: {e}")
-        finally:
-            try:
-                c.close()
-            except Exception:
-                pass
-
-    if players:
-        with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-            list(ex.map(work, players))
-    return jsonify({"ok": True, **result, "errors": errors})
+@app.route("/api/admin/refresh-status")
+@admin_required
+def admin_refresh_status():
+    with REFRESH_LOCK:
+        return jsonify(dict(REFRESH))
 
 
 # ---------- 페이지 ----------
@@ -757,17 +789,25 @@ async function removePlayer(id){
 }
 async function refreshAll(){
   const btn=$('#refreshBtn'); btn.disabled=true;
-  $('#msg').innerHTML='<div class="muted">갱신 중… 인원에 따라 시간이 걸립니다.</div>';
+  $('#msg').innerHTML='<div class="muted">갱신 시작 중…</div>';
   try{
     const r=await fetch('/api/admin/refresh',{method:'POST'}); const d=await r.json();
-    if(!r.ok){ $('#msg').innerHTML=`<div class="err">${esc(d.error||'오류')}</div>`; }
-    else{
-      let m=`<div class="ok">${d.updated}명 갱신 완료${d.failed?`, ${d.failed}명 실패`:''}</div>`;
-      if(d.errors&&d.errors.length){ m+=`<div class="err">사유: ${esc(d.errors.join(' | '))}</div>`; }
-      $('#msg').innerHTML=m; loadList();
+    if(!r.ok){ $('#msg').innerHTML=`<div class="err">${esc(d.error||'오류')}</div>`; btn.disabled=false; return; }
+    pollStatus();
+  }catch(e){ $('#msg').innerHTML='<div class="err">갱신 시작 실패</div>'; btn.disabled=false; }
+}
+async function pollStatus(){
+  try{
+    const r=await fetch('/api/admin/refresh-status'); const s=await r.json();
+    if(s.running){
+      $('#msg').innerHTML=`<div class="muted">갱신 중… ${s.updated+s.failed}/${s.total||'?'}</div>`;
+      setTimeout(pollStatus,2000);
+    }else{
+      let m=`<div class="ok">${s.updated}명 갱신 완료${s.failed?`, ${s.failed}명 실패`:''}</div>`;
+      if(s.errors&&s.errors.length){ m+=`<div class="err">사유: ${esc(s.errors.join(' | '))}</div>`; }
+      $('#msg').innerHTML=m; $('#refreshBtn').disabled=false; loadList();
     }
-  }catch(e){ $('#msg').innerHTML='<div class="err">갱신 요청 실패</div>'; }
-  finally{ btn.disabled=false; }
+  }catch(e){ setTimeout(pollStatus,2500); }
 }
 if($('#addBtn')){
   $('#addBtn').addEventListener('click',addPlayer);
