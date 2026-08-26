@@ -664,7 +664,7 @@ THEME = r"""
 PAGE = r"""
 <!doctype html><html lang="ko"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>회원 대시보드</title>
+<title>아럽롤 회원 대시보드</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Marcellus&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@600&display=swap" rel="stylesheet">
 <style>__THEME__
@@ -727,12 +727,12 @@ PAGE = r"""
 </style></head><body>
 <div class="wrap">
   <div class="eyebrow">League of Legends</div>
-  <h1>회원 대시보드</h1>
-  <p class="sub">등록된 회원과 챔피언별 최고 숙련자입니다. · <a href="/admin">관리자</a></p>
+  <h1>아럽롤 회원 대시보드</h1>
 
   <div class="reqbox">
     <input id="reqId" placeholder="회원 등록 요청 — 소환사명#KR1" autocomplete="off">
     <button id="reqBtn">요청</button>
+    <button onclick="location.href='/admin'">관리자</button>
   </div>
   <div id="reqMsg" class="reqmsg"></div>
 
