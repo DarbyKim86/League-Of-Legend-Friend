@@ -86,6 +86,13 @@ def init_db():
                     PRIMARY KEY (player_id, champion_id)
                 );
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS join_requests (
+                    id           SERIAL PRIMARY KEY,
+                    riot_id      TEXT NOT NULL,
+                    requested_at TIMESTAMPTZ DEFAULT now()
+                );
+            """)
     finally:
         conn.close()
 
@@ -413,12 +420,11 @@ def admin_list():
     return jsonify({"players": rows})
 
 
-@app.route("/api/admin/add", methods=["POST"])
-@admin_required
-def admin_add():
-    raw = ((request.json or {}).get("riotId") or "").strip()
+def add_member(raw):
+    """라이엇 ID 문자열로 회원을 해석·등록·저장. (status_code, body dict) 반환."""
+    raw = (raw or "").strip()
     if not raw:
-        return jsonify({"error": "라이엇 ID를 입력하세요."}), 400
+        return 400, {"error": "라이엇 ID를 입력하세요."}
     if "#" in raw:
         name, tag = raw.rsplit("#", 1)
     else:
@@ -427,11 +433,12 @@ def admin_add():
     try:
         acc = riot_get(REGION_HOST, f"/riot/account/v1/accounts/by-riot-id/{quote(name)}/{quote(tag)}")
     except requests.HTTPError as e:
-        if e.response.status_code == 404:
-            return jsonify({"error": "라이엇 ID를 찾을 수 없습니다."}), 404
-        if e.response.status_code in (401, 403):
-            return jsonify({"error": "API 키가 만료/무효입니다."}), 401
-        return jsonify({"error": f"조회 오류 (HTTP {e.response.status_code})"}), 502
+        code = e.response.status_code
+        if code == 404:
+            return 404, {"error": "라이엇 ID를 찾을 수 없습니다."}
+        if code in (401, 403):
+            return 401, {"error": "API 키가 만료/무효입니다."}
+        return 502, {"error": f"조회 오류 (HTTP {code})"}
 
     puuid = acc["puuid"]
     real_name = acc.get("gameName", name)
@@ -448,7 +455,6 @@ def admin_add():
     finally:
         conn.close()
 
-    # 새로 추가된 회원은 바로 정보 저장(실패해도 명단엔 남고 나중에 갱신 가능)
     if new_id:
         try:
             c = get_db()
@@ -458,7 +464,88 @@ def admin_add():
                 c.close()
         except Exception:
             pass
-    return jsonify({"ok": True, "added": bool(new_id), "name": f"{real_name}#{real_tag}"})
+    return 200, {"ok": True, "added": bool(new_id), "name": f"{real_name}#{real_tag}"}
+
+
+@app.route("/api/admin/add", methods=["POST"])
+@admin_required
+def admin_add():
+    code, body = add_member((request.json or {}).get("riotId"))
+    return jsonify(body), code
+
+
+# ---------- 회원 등록 요청 (공개) ----------
+@app.route("/api/request-join", methods=["POST"])
+def request_join():
+    raw = ((request.json or {}).get("riotId") or "").strip()
+    if not raw or len(raw) > 60:
+        return jsonify({"error": "라이엇 ID를 올바르게 입력하세요."}), 400
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM players WHERE lower(game_name || '#' || tag_line) = lower(%s)", (raw,))
+            if cur.fetchone():
+                return jsonify({"ok": True, "already": "member"})
+            cur.execute("SELECT 1 FROM join_requests WHERE lower(riot_id) = lower(%s)", (raw,))
+            if cur.fetchone():
+                return jsonify({"ok": True, "already": "request"})
+            cur.execute("INSERT INTO join_requests (riot_id) VALUES (%s)", (raw,))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/admin/requests")
+@admin_required
+def admin_requests():
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT id, riot_id, requested_at FROM join_requests ORDER BY requested_at")
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    for r in rows:
+        r["requested_at"] = r["requested_at"].isoformat() if r["requested_at"] else None
+    return jsonify({"requests": rows})
+
+
+@app.route("/api/admin/approve", methods=["POST"])
+@admin_required
+def admin_approve():
+    rid = (request.json or {}).get("id")
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT riot_id FROM join_requests WHERE id = %s", (rid,))
+            r = cur.fetchone()
+    finally:
+        conn.close()
+    if not r:
+        return jsonify({"error": "요청을 찾을 수 없습니다."}), 404
+    code, body = add_member(r[0])
+    if code == 200:
+        conn = get_db()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM join_requests WHERE id = %s", (rid,))
+        finally:
+            conn.close()
+    return jsonify(body), code
+
+
+@app.route("/api/admin/reject", methods=["POST"])
+@admin_required
+def admin_reject():
+    rid = (request.json or {}).get("id")
+    conn = get_db()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM join_requests WHERE id = %s", (rid,))
+    finally:
+        conn.close()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/admin/remove", methods=["POST"])
@@ -617,6 +704,9 @@ PAGE = r"""
   .opgg{align-self:center;background:transparent;border:1px solid var(--blue);color:var(--blue);
         border-radius:9px;padding:8px 14px;font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap}
   .opgg:hover{background:var(--blue);color:#fff}
+  .reqbox{display:flex;gap:8px;margin:-8px 0 6px}
+  .reqbox input{flex:1}
+  .reqmsg{color:var(--muted);font-size:12.5px;margin:0 2px 18px;min-height:16px}
   .rk-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}
   .rk-title{font-family:'Marcellus',serif;font-size:17px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
   .rk-title img{width:24px;height:24px;border-radius:6px;border:1px solid var(--line)}
@@ -639,6 +729,12 @@ PAGE = r"""
   <div class="eyebrow">League of Legends</div>
   <h1>회원 대시보드</h1>
   <p class="sub">등록된 회원과 챔피언별 최고 숙련자입니다. · <a href="/admin">관리자</a></p>
+
+  <div class="reqbox">
+    <input id="reqId" placeholder="회원 등록 요청 — 소환사명#KR1" autocomplete="off">
+    <button id="reqBtn">요청</button>
+  </div>
+  <div id="reqMsg" class="reqmsg"></div>
 
   <div class="tabs">
     <div class="tab on" data-tab="members">회원 리스트</div>
@@ -700,7 +796,7 @@ async function showMemberDetail(pid){
     const icon=(VERSION&&d.iconId!=null)?`<img src="${dd('profileicon/'+d.iconId+'.png')}">`:'';
     let h=`<button class="back" onclick="backToMembers()">← 목록으로</button>`;
     h+=`<div class="bar-champ">${icon}<div style="flex:1"><b>${esc(d.name)}</b> <span class="muted">#${esc(d.tag)}</span><div class="muted" style="font-size:13px">Lv.${d.level??'-'}</div></div>`;
-    if(d.opgg){ h+=`<a class="opgg" href="${d.opgg}" target="_blank" rel="noopener">op.gg ↗</a>`; }
+    if(d.opgg){ h+=`<a class="opgg" href="${d.opgg}" target="_blank" rel="noopener">OP.GG ↗</a>`; }
     h+=`</div>`;
     h+=`<div class="stats">
         <div class="stat"><div class="s-val">${d.total.toLocaleString()}</div><div class="s-lab">총 숙련도</div></div>
@@ -718,6 +814,22 @@ async function showMemberDetail(pid){
   }catch(e){ $('#member-detail').innerHTML='<button class="back" onclick="backToMembers()">← 목록으로</button><div class="muted" style="text-align:center;padding:16px">불러오기 실패</div>'; }
 }
 function backToMembers(){ $('#member-detail').style.display='none'; $('#member-browse').style.display=''; }
+
+async function submitRequest(){
+  const v=$('#reqId').value.trim(); if(!v) return;
+  $('#reqBtn').disabled=true; $('#reqMsg').textContent='요청 중…';
+  try{
+    const r=await fetch('/api/request-join',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({riotId:v})});
+    const d=await r.json();
+    if(!r.ok){ $('#reqMsg').textContent=d.error||'오류가 발생했습니다.'; }
+    else if(d.already==='member'){ $('#reqMsg').textContent='이미 등록된 회원입니다.'; }
+    else if(d.already==='request'){ $('#reqMsg').textContent='이미 등록 요청된 아이디입니다.'; }
+    else{ $('#reqMsg').textContent='등록 요청이 접수되었습니다. 관리자 승인 후 추가됩니다.'; $('#reqId').value=''; }
+  }catch(e){ $('#reqMsg').textContent='요청에 실패했습니다.'; }
+  finally{ $('#reqBtn').disabled=false; }
+}
+$('#reqBtn').addEventListener('click', submitRequest);
+$('#reqId').addEventListener('keydown', e=>{ if(e.key==='Enter') submitRequest(); });
 
 function renderChamps(filter){
   const f=(filter||'').trim();
@@ -816,6 +928,11 @@ ADMIN_PAGE = r"""
   .prow .lv{color:var(--muted);font-size:12px}
   .del{background:transparent;border:1px solid var(--red);color:var(--red);padding:6px 12px}
   .del:hover{background:var(--red);color:#fff}
+  .appr{background:transparent;border:1px solid var(--gold);color:var(--gold);padding:6px 12px;margin-right:6px}
+  .appr:hover{background:var(--gold);color:#1a1204}
+  .reqhdr{font-family:'Marcellus',serif;font-size:16px;margin:0 2px 8px}
+  .reqhdr .badge{font-family:'Inter';font-size:12px;color:#1a1204;background:var(--gold);border-radius:99px;padding:0 7px;margin-left:6px}
+  .reqtime{color:var(--muted);font-size:11px}
   .refresh{background:transparent;border:1px solid var(--blue);color:var(--blue)}
   .refresh:hover{background:var(--blue);color:#fff}
   .err{color:#E9A2AD;font-size:13px;margin-top:8px}
@@ -841,6 +958,7 @@ ADMIN_PAGE = r"""
       </div>
       <div class="bar"><button id="refreshBtn" class="refresh" style="width:100%">전체 정보 갱신 (레벨·숙련도)</button></div>
       <div id="msg"></div>
+      <div id="reqList" style="margin-top:16px"></div>
       <div id="list" style="margin-top:16px"></div>
       <div style="margin-top:16px"><a href="/admin/logout">로그아웃</a></div>
     </div>
@@ -895,11 +1013,32 @@ async function pollStatus(){
     }
   }catch(e){ setTimeout(pollStatus,2500); }
 }
+async function loadRequests(){
+  const r=await fetch('/api/admin/requests'); if(!r.ok) return;
+  const d=await r.json();
+  if(!d.requests.length){ $('#reqList').innerHTML=''; return; }
+  $('#reqList').innerHTML=`<div class="reqhdr">등록 요청<span class="badge">${d.requests.length}</span></div>`+
+    d.requests.map(q=>`<div class="prow"><span class="nm">${esc(q.riot_id)}<div class="reqtime">${q.requested_at?esc(q.requested_at.slice(0,16).replace('T',' ')):''}</div></span>
+      <button class="appr" onclick="approveReq(${q.id})">승인</button>
+      <button class="del" onclick="rejectReq(${q.id})">거절</button></div>`).join('');
+}
+async function approveReq(id){
+  $('#msg').innerHTML='<div class="muted">승인 처리 중…</div>';
+  const r=await fetch('/api/admin/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  const d=await r.json();
+  if(!r.ok){ $('#msg').innerHTML=`<div class="err">${esc(d.error||'오류')}</div>`; }
+  else{ $('#msg').innerHTML=`<div class="ok">${d.added?'등록됨':'이미 등록됨'}: ${esc(d.name||'')}</div>`; }
+  loadRequests(); loadList();
+}
+async function rejectReq(id){
+  await fetch('/api/admin/reject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  loadRequests();
+}
 if($('#addBtn')){
   $('#addBtn').addEventListener('click',addPlayer);
   $('#riotId').addEventListener('keydown',e=>{if(e.key==='Enter')addPlayer();});
   $('#refreshBtn').addEventListener('click',refreshAll);
-  loadList();
+  loadRequests(); loadList();
 }
 </script></body></html>
 """
