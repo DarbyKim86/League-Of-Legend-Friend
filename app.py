@@ -518,7 +518,8 @@ def build_battle(A, B, champs):
                 q = [{"op": o, "sym": s, "title": "", "desc": "", "operand": None, "w": 1}
                      for o, s in OPS if o != banned]
             return q
-        pool1, pool2, pool_lucky = _ban(pool1), _ban(pool2), _ban(pool_lucky)
+        # 연산 금지는 1라운드(행운의 뽑기 포함)에만 적용. 2라운드는 영향 없음.
+        pool1, pool_lucky = _ban(pool1), _ban(pool_lucky)
     try:
         bonus = int(event["param"]) if event["kind"] == "start_bonus" else 0
     except (TypeError, ValueError):
@@ -1680,6 +1681,7 @@ const RULES={
       <li>스탯 수치는 자릿수를 모두 더해 <b>0~9로 압축</b>해서 씁니다(밸런스). 나눗셈은 반올림, ÷0은 무효 처리.</li>
       <li>마지막 행운의 뽑기는 스탯과 무관하게 <b>0~9 랜덤 숫자</b>로 겨룹니다.</li>
       <li>5전투 후 <b>최종 점수</b>가 높은 쪽이 1라운드 승리.</li>
+      <li>시작 시 뽑힌 <b>상황·환경</b>(연산 금지·시작 보너스 등)은 이 1라운드에만 적용됩니다.</li>
     </ul>`},
   round2:{t:'ROUND 2 · 챔피언 대결', b:`
     <ul>
