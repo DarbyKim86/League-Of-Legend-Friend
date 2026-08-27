@@ -120,6 +120,29 @@ def init_db():
             cur.execute("ALTER TABLE battle_effects ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT '';")
             cur.execute("ALTER TABLE battle_effects ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';")
             cur.execute("ALTER TABLE battle_effects ADD COLUMN IF NOT EXISTS operand INT;")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS battle_events (
+                    id          SERIAL PRIMARY KEY,
+                    title       TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    kind        TEXT NOT NULL,           -- 'none' | 'ban_op' | 'start_bonus'
+                    param       TEXT,                    -- ban_op: 'add'/'sub'/'mul'/'div', start_bonus: '500'
+                    weight      INT NOT NULL DEFAULT 1,
+                    active      BOOLEAN NOT NULL DEFAULT true
+                );
+            """)
+            cur.execute("""
+                INSERT INTO battle_events (title, description, kind, param, weight)
+                SELECT * FROM (VALUES
+                    ('평범한 협곡','별다른 사건 없이 정정당당','none',NULL,3),
+                    ('곱셈 봉인','이번 판은 곱셈이 금지된다','ban_op','mul',1),
+                    ('덧셈 봉인','이번 판은 덧셈이 금지된다','ban_op','add',1),
+                    ('뺄셈 봉인','이번 판은 뺄셈이 금지된다','ban_op','sub',1),
+                    ('나눗셈 봉인','이번 판은 나눗셈이 금지된다','ban_op','div',1),
+                    ('축복의 시작','전 회원 시작 점수 +500','start_bonus','500',1)
+                ) v(title,description,kind,param,weight)
+                WHERE NOT EXISTS (SELECT 1 FROM battle_events);
+            """)
     finally:
         conn.close()
 
@@ -369,7 +392,8 @@ def api_compare():
 
 # ---------- 로그라이크 전투 엔진 ----------
 OPS = [("add", "+"), ("sub", "−"), ("mul", "×"), ("div", "÷")]
-SYM = {"add": "+", "sub": "−", "mul": "×", "div": "÷"}
+SYM = {"add": "+", "sub": "−", "mul": "×", "div": "÷", "rev": "↺", "swap": "⇄"}
+UNARY_OPS = ("rev", "swap")   # 피연산자 없이 점수 자체를 변형
 
 
 def load_effects(context):
@@ -405,10 +429,57 @@ def pick_effect(pool):
     return pool[-1]
 
 
+def load_events():
+    pool = []
+    try:
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""SELECT title, description, kind, param, weight FROM battle_events
+                               WHERE active AND weight > 0""")
+                pool = [{"title": r["title"] or "", "desc": r["description"] or "",
+                         "kind": r["kind"], "param": r["param"], "w": int(r["weight"])}
+                        for r in cur.fetchall()]
+        finally:
+            conn.close()
+    except Exception as e:
+        print("load_events 실패:", e)
+    return pool
+
+
+def pick_event():
+    pool = load_events()
+    if not pool:
+        return {"title": "평범한 협곡", "desc": "", "kind": "none", "param": None}
+    total = sum(e["w"] for e in pool)
+    r = random.uniform(0, total)
+    acc = 0
+    for e in pool:
+        acc += e["w"]
+        if r <= acc:
+            return e
+    return pool[-1]
+
+
 def digital_root(n):
     """자릿수를 반복해서 더해 한 자리로 (0~9). 밸런스 모드 압축."""
     n = abs(int(n or 0))
     return 0 if n == 0 else 1 + (n - 1) % 9
+
+
+def _reverse_digits(n):
+    n = int(n)
+    sign = -1 if n < 0 else 1
+    return sign * int(str(abs(n))[::-1] or "0")
+
+
+def _swap_ends(n):
+    n = int(n)
+    sign = -1 if n < 0 else 1
+    s = list(str(abs(n)))
+    if len(s) > 1:
+        s[0], s[-1] = s[-1], s[0]
+    return sign * int("".join(s))
 
 
 def apply_op(score, op, operand):
@@ -422,6 +493,10 @@ def apply_op(score, op, operand):
         if operand == 0:
             operand = 1                      # ÷0 방어
         return math.floor(score / operand + 0.5)   # 반올림
+    if op == "rev":
+        return _reverse_digits(score)        # 자릿수 뒤집기 (피연산자 무시)
+    if op == "swap":
+        return _swap_ends(score)             # 앞뒤 자리 교환 (피연산자 무시)
     return score
 
 
@@ -430,12 +505,28 @@ def _winner(a, b):
 
 
 def build_battle(A, B, champs):
+    event = pick_event()
     pool1 = load_effects("round1")
     pool2 = load_effects("round2")
     pool_lucky = load_effects("lucky")
+    if event["kind"] == "ban_op":
+        banned = event["param"]
 
-    # ---- 라운드 1: 스탯 대결 (1000점 시작, 5전투 누적) ----
-    a_score = b_score = 1000
+        def _ban(p):
+            q = [e for e in p if e["op"] != banned]
+            if not q:
+                q = [{"op": o, "sym": s, "title": "", "desc": "", "operand": None, "w": 1}
+                     for o, s in OPS if o != banned]
+            return q
+        pool1, pool2, pool_lucky = _ban(pool1), _ban(pool2), _ban(pool_lucky)
+    try:
+        bonus = int(event["param"]) if event["kind"] == "start_bonus" else 0
+    except (TypeError, ValueError):
+        bonus = 0
+    start = 1000 + bonus
+
+    # ---- 라운드 1: 스탯 대결 (start점 시작, 5전투 누적) ----
+    a_score = b_score = start
     r1 = []
     stat_defs = [
         ("레벨", A.get("level") or 0, B.get("level") or 0),
@@ -464,7 +555,7 @@ def build_battle(A, B, champs):
                "aOperand": aop, "bOperand": bop,
                "aBefore": ab, "bBefore": bb, "aAfter": a_score, "bAfter": b_score,
                "lead": _winner(a_score, b_score)})
-    round1 = {"start": 1000, "battles": r1, "aFinal": a_score, "bFinal": b_score,
+    round1 = {"start": start, "battles": r1, "aFinal": a_score, "bFinal": b_score,
               "winner": _winner(a_score, b_score)}
 
     # ---- 라운드 2: 챔피언 대결 (원 숙련도 기준, 각 회원 각자 랜덤 사칙연산) ----
@@ -484,6 +575,7 @@ def build_battle(A, B, champs):
             bw += 1
         r2.append({"championId": c["championId"], "name": c["name"], "img": c["img"],
                    "aSym": ea["sym"], "bSym": eb["sym"],
+                   "aOp": ea["op"], "bOp": eb["op"],
                    "aTitle": ea["title"], "aDesc": ea["desc"],
                    "bTitle": eb["title"], "bDesc": eb["desc"],
                    "aBase": c["aM"], "bBase": c["bM"],
@@ -495,6 +587,8 @@ def build_battle(A, B, champs):
     ra = (1 if round1["winner"] == "a" else 0) + (1 if round2["winner"] == "a" else 0)
     rb = (1 if round1["winner"] == "b" else 0) + (1 if round2["winner"] == "b" else 0)
     return {"round1": round1, "round2": round2,
+            "event": {"title": event["title"], "description": event["desc"],
+                      "kind": event["kind"], "param": event["param"]},
             "roundsWon": {"a": ra, "b": rb}, "overall": _winner(ra, rb)}
 
 
@@ -847,6 +941,81 @@ def admin_effects_remove():
     return jsonify({"ok": True})
 
 
+# ---------- 상황·환경 이벤트 관리 ----------
+@app.route("/api/admin/events")
+@admin_required
+def admin_events():
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""SELECT id, title, description, kind, param, weight, active
+                           FROM battle_events ORDER BY id""")
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return jsonify({"events": rows})
+
+
+@app.route("/api/admin/events/add", methods=["POST"])
+@admin_required
+def admin_events_add():
+    d = request.json or {}
+    kind = (d.get("kind") or "").strip()
+    if kind not in ("none", "ban_op", "start_bonus"):
+        return jsonify({"error": "종류를 선택하세요."}), 400
+    title = (d.get("title") or "").strip()[:40]
+    description = (d.get("description") or "").strip()[:120]
+    param = d.get("param")
+    if kind == "ban_op":
+        if param not in SYM:
+            return jsonify({"error": "금지할 연산을 선택하세요."}), 400
+    elif kind == "start_bonus":
+        try:
+            param = str(int(param))
+        except (ValueError, TypeError):
+            return jsonify({"error": "보너스 점수를 숫자로 입력하세요."}), 400
+    else:
+        param = None
+    try:
+        weight = max(1, min(100, int(d.get("weight", 1))))
+    except (ValueError, TypeError):
+        weight = 1
+    conn = get_db()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("""INSERT INTO battle_events (title, description, kind, param, weight)
+                           VALUES (%s, %s, %s, %s, %s)""", (title, description, kind, param, weight))
+    finally:
+        conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/admin/events/toggle", methods=["POST"])
+@admin_required
+def admin_events_toggle():
+    eid = (request.json or {}).get("id")
+    conn = get_db()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("UPDATE battle_events SET active = NOT active WHERE id = %s", (eid,))
+    finally:
+        conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/admin/events/remove", methods=["POST"])
+@admin_required
+def admin_events_remove():
+    eid = (request.json or {}).get("id")
+    conn = get_db()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM battle_events WHERE id = %s", (eid,))
+    finally:
+        conn.close()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/admin/remove", methods=["POST"])
 @admin_required
 def admin_remove():
@@ -1044,6 +1213,9 @@ PAGE = r"""
   .round-title{text-align:center;font-family:'Marcellus',serif;font-size:16px;color:var(--gold);margin:20px 0 10px}
   .scoreboard{display:flex;align-items:center;justify-content:center;gap:14px;margin:6px 0 4px;
     background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px}
+  .env{text-align:center;font-size:13px;color:var(--text);background:rgba(75,156,211,.12);
+    border:1px solid var(--blue);border-radius:10px;padding:9px 12px;margin:14px 0 4px}
+  .env b{color:var(--blue)}
   .scoreboard .sb{display:flex;align-items:baseline;gap:8px}
   .scoreboard .sb.b{flex-direction:row}
   .scoreboard .sb-nm{color:var(--muted);font-size:12px;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1350,6 +1522,7 @@ function populateCompare(){
   if($('#cmpA').options.length<=1){ $('#cmpA').innerHTML=opts; $('#cmpB').innerHTML=opts; }
 }
 const nf=n=>(n==null?0:n).toLocaleString();
+const UNARY=['rev','swap'];
 
 async function runBattle(){
   const a=$('#cmpA').value, b=$('#cmpB').value;
@@ -1371,7 +1544,7 @@ function roundText(w,A,B,aw,bw){
   return `무승부 (${aw} : ${bw})`;
 }
 function spinOp(el, finalSym, dur){
-  const syms=['+','−','×','÷']; const start=performance.now();
+  const syms=['+','−','×','÷','↺','⇄']; const start=performance.now();
   (function tick(){
     if(performance.now()-start>=dur){ el.textContent=finalSym; el.classList.add('locked'); return; }
     el.textContent=syms[(Math.random()*4)|0]; setTimeout(tick,55);
@@ -1395,7 +1568,7 @@ function markLead(el){
 }
 
 function renderBattle(d){
-  const A=d.a, B=d.b, R1=d.round1, R2=d.round2;
+  const A=d.a, B=d.b, R1=d.round1, R2=d.round2, EV=d.event||{};
 
   let h=`<div class="faceoff">
     <div class="fighter left">${fico(A)}<div class="fn">${esc(A.name)}</div></div>
@@ -1403,21 +1576,24 @@ function renderBattle(d){
     <div class="fighter right">${fico(B)}<div class="fn">${esc(B.name)}</div></div>
   </div>`;
 
+  h+=`<div class="env reveal">🌍 <b>${esc(EV.title||'평범한 협곡')}</b>${EV.description?' · <span class="muted">'+esc(EV.description)+'</span>':''}</div>`;
+
   // 실시간 점수판
   h+=`<div class="scoreboard">
-    <div class="sb a"><span class="sb-nm">${esc(A.name)}</span><span class="sb-val" id="sbA">1000</span></div>
+    <div class="sb a"><span class="sb-nm">${esc(A.name)}</span><span class="sb-val" id="sbA">${nf(R1.start)}</span></div>
     <div class="sb-col">:</div>
-    <div class="sb b"><span class="sb-val" id="sbB">1000</span><span class="sb-nm">${esc(B.name)}</span></div>
+    <div class="sb b"><span class="sb-val" id="sbB">${nf(R1.start)}</span><span class="sb-nm">${esc(B.name)}</span></div>
   </div>`;
 
   // 라운드 1
   h+=`<div class="round-title reveal">⚔️ ROUND 1 · 스탯 대결 <span class="help" onclick="showRules('round1')">?</span></div>`;
   R1.battles.forEach(bt=>{
+    const un=UNARY.includes(bt.op);
     h+=`<div class="bt reveal" data-sym="${bt.sym}" data-a="${bt.aAfter}" data-b="${bt.bAfter}">
       <div class="bt-lab">${bt.random?'🎲 ':''}${esc(bt.label)}${bt.effTitle?' · <span class="eff" title="'+esc(bt.effDesc||'')+'">'+esc(bt.effTitle)+'</span>':''}</div>
       <div class="bt-math">
-        <span class="m a">${nf(bt.aBefore)} <span class="op">?</span> ${bt.aOperand} = <b>?</b></span>
-        <span class="m b">${nf(bt.bBefore)} <span class="op">?</span> ${bt.bOperand} = <b>?</b></span>
+        <span class="m a">${nf(bt.aBefore)} <span class="op">?</span>${un?'':' '+bt.aOperand} = <b>?</b></span>
+        <span class="m b">${nf(bt.bBefore)} <span class="op">?</span>${un?'':' '+bt.bOperand} = <b>?</b></span>
       </div></div>`;
   });
   h+=`<div class="round-sum reveal">1라운드 최종 ${nf(R1.aFinal)} : ${nf(R1.bFinal)} — ${roundText(R1.winner,A,B,Math.max(R1.aFinal,R1.bFinal),Math.min(R1.aFinal,R1.bFinal))}</div>`;
@@ -1427,11 +1603,12 @@ function renderBattle(d){
   if(!R2.battles.length){ h+=`<div class="reveal muted" style="text-align:center;padding:8px">공통으로 비교할 챔피언이 없습니다.</div>`; }
   R2.battles.forEach(c=>{
     const ci=(VERSION&&c.img)?`<img src="${dd('champion/'+c.img+'.png')}">`:'';
+    const ua=UNARY.includes(c.aOp), ub=UNARY.includes(c.bOp);
     h+=`<div class="bt champ reveal" data-asym="${c.aSym}" data-bsym="${c.bSym}" data-win="${c.winner}">
       <div class="bt-lab">${ci}<span>${esc(c.name)}</span></div>
       <div class="bt-math">
-        <span class="m a">${nf(c.aBase)} <span class="op">?</span> ${c.aOperand} = <b data-to="${c.aScore}">?</b>${c.aTitle?' <span class="eff" title="'+esc(c.aDesc||'')+'">'+esc(c.aTitle)+'</span>':''}</span>
-        <span class="m b">${nf(c.bBase)} <span class="op">?</span> ${c.bOperand} = <b data-to="${c.bScore}">?</b>${c.bTitle?' <span class="eff" title="'+esc(c.bDesc||'')+'">'+esc(c.bTitle)+'</span>':''}</span>
+        <span class="m a">${nf(c.aBase)} <span class="op">?</span>${ua?'':' '+c.aOperand} = <b data-to="${c.aScore}">?</b>${c.aTitle?' <span class="eff" title="'+esc(c.aDesc||'')+'">'+esc(c.aTitle)+'</span>':''}</span>
+        <span class="m b">${nf(c.bBase)} <span class="op">?</span>${ub?'':' '+c.bOperand} = <b data-to="${c.bScore}">?</b>${c.bTitle?' <span class="eff" title="'+esc(c.bDesc||'')+'">'+esc(c.bTitle)+'</span>':''}</span>
       </div></div>`;
   });
   h+=`<div class="round-sum reveal">2라운드 — ${roundText(R2.winner,A,B,R2.aWins,R2.bWins)}</div>`;
@@ -1450,7 +1627,7 @@ function renderBattle(d){
 
   $('#cmp-result').innerHTML=h;
   const sbA=$('#sbA'), sbB=$('#sbB');
-  let prevA=1000, prevB=1000;
+  let prevA=R1.start, prevB=R1.start;
   const setLead=(na,nb)=>{ $('.scoreboard .sb.a').classList.toggle('lead',na>nb); $('.scoreboard .sb.b').classList.toggle('lead',nb>na); };
 
   const els=[...document.querySelectorAll('#cmp-result .reveal')];
@@ -1497,6 +1674,7 @@ const RULES={
       <li>챔피언마다 두 회원이 <b>각자</b> 자신의 원래 숙련도에 무작위 사칙연산을 적용합니다.</li>
       <li>결과가 높은 쪽이 그 챔피언 승. <b>이긴 챔피언 수</b>가 많은 회원이 2라운드 승리.</li>
       <li>관리자가 지정한 <b>후처리 숫자</b> 효과는 여기서 ×9처럼 고정 연산으로 걸립니다.</li>
+      <li>사칙연산 외에 <b>↺ 자릿수 뒤집기</b>, <b>⇄ 앞뒤 자리 교환</b> 같은 특수 연산도 나올 수 있습니다.</li>
     </ul>
     <div style="margin-top:6px"><b>최종 승자</b> — 1·2라운드 중 더 많이 이긴 쪽이 승리, 1:1이면 무승부입니다.</div>`},
 };
@@ -1530,6 +1708,9 @@ ADMIN_PAGE = r"""
 <link href="https://fonts.googleapis.com/css2?family=Marcellus&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>__THEME__
   .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px;max-width:480px}
+  .tabs{display:flex;gap:6px;max-width:480px;margin-bottom:12px}
+  .tab{flex:1;text-align:center;padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--muted);cursor:pointer;font-size:14px}
+  .tab.on{border-color:var(--gold);color:var(--gold-bright);background:var(--surface2)}
   .prow{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--surface2);margin-bottom:7px}
   .prow .nm{flex:1}
   .prow .lv{color:var(--muted);font-size:12px}
@@ -1564,43 +1745,85 @@ ADMIN_PAGE = r"""
       <div class="err" id="loginerr" style="display:none">비밀번호가 틀립니다.</div>
     </div>
   {% else %}
-    <div class="card">
-      <div class="bar">
-        <input id="riotId" placeholder="소환사명#KR1" style="flex:1" autocomplete="off">
-        <button id="addBtn">추가</button>
-      </div>
-      <div class="bar"><button id="refreshBtn" class="refresh" style="width:100%">전체 정보 갱신 (레벨·숙련도)</button></div>
-      <div id="msg"></div>
-      <div id="reqList" style="margin-top:16px"></div>
-      <div id="list" style="margin-top:16px"></div>
-      <div style="margin-top:16px"><a href="/admin/logout">로그아웃</a></div>
+    <div class="tabs">
+      <div class="tab on" data-atab="members">멤버 관리</div>
+      <div class="tab" data-atab="effects">전투 이펙트</div>
+      <div class="tab" data-atab="events">상황·환경</div>
     </div>
-    <div class="card" style="margin-top:14px">
-      <div class="reqhdr">전투 효과 관리</div>
-      <div class="eff-form">
-        <input id="effTitle" placeholder="제목 (예: 완벽한 바텀 듀오)" autocomplete="off">
-        <input id="effDesc" placeholder="설명 (예: 눈빛만 봐도 킬각을 잡는 협곡 최강의 호흡)" autocomplete="off">
-        <div class="eff-row">
-          <select id="effOp">
-            <option value="add">덧셈 +</option>
-            <option value="sub">뺄셈 −</option>
-            <option value="mul">곱셈 ×</option>
-            <option value="div">나눗셈 ÷</option>
-          </select>
-          <select id="effCtx">
-            <option value="both">전체 라운드</option>
-            <option value="round1">1라운드</option>
-            <option value="round2">2라운드</option>
-            <option value="lucky">행운의 뽑기</option>
-          </select>
-          <input id="effOperand" type="number" min="0" max="9" placeholder="후처리 숫자" title="2라운드 전용, 비우면 랜덤">
-          <input id="effWeight" type="number" value="1" min="1" max="100" title="가중치">
-          <button id="effAddBtn">추가</button>
+
+    <div id="atab-members">
+      <div class="card">
+        <div class="bar">
+          <input id="riotId" placeholder="소환사명#KR1" style="flex:1" autocomplete="off">
+          <button id="addBtn">추가</button>
         </div>
+        <div class="bar"><button id="refreshBtn" class="refresh" style="width:100%">전체 정보 갱신 (레벨·숙련도)</button></div>
+        <div id="msg"></div>
+        <div id="reqList" style="margin-top:16px"></div>
+        <div id="list" style="margin-top:16px"></div>
       </div>
-      <div id="effMsg"></div>
-      <div id="effList" style="margin-top:12px"></div>
     </div>
+
+    <div id="atab-effects" style="display:none">
+      <div class="card">
+        <div class="reqhdr">전투 효과 관리</div>
+        <div class="eff-form">
+          <input id="effTitle" placeholder="제목 (예: 완벽한 바텀 듀오)" autocomplete="off">
+          <input id="effDesc" placeholder="설명 (예: 눈빛만 봐도 킬각을 잡는 협곡 최강의 호흡)" autocomplete="off">
+          <div class="eff-row">
+            <select id="effOp">
+              <option value="add">덧셈 +</option>
+              <option value="sub">뺄셈 −</option>
+              <option value="mul">곱셈 ×</option>
+              <option value="div">나눗셈 ÷</option>
+              <option value="rev">자릿수 뒤집기 ↺</option>
+              <option value="swap">앞뒤 자리 교환 ⇄</option>
+            </select>
+            <select id="effCtx">
+              <option value="both">전체 라운드</option>
+              <option value="round1">1라운드</option>
+              <option value="round2">2라운드</option>
+              <option value="lucky">행운의 뽑기</option>
+            </select>
+            <input id="effOperand" type="number" min="0" max="9" placeholder="후처리 숫자" title="2라운드 전용, 비우면 랜덤">
+            <input id="effWeight" type="number" value="1" min="1" max="100" title="가중치">
+            <button id="effAddBtn">추가</button>
+          </div>
+        </div>
+        <div id="effMsg"></div>
+        <div id="effList" style="margin-top:12px"></div>
+      </div>
+    </div>
+
+    <div id="atab-events" style="display:none">
+      <div class="card">
+        <div class="reqhdr">상황·환경 이벤트 <span class="muted" style="font-size:12px">(라운드 시작 시 1개 추첨)</span></div>
+        <div class="eff-form">
+          <input id="evTitle" placeholder="제목 (예: 곱셈 봉인)" autocomplete="off">
+          <input id="evDesc" placeholder="설명 (예: 이번 판은 곱셈이 금지된다)" autocomplete="off">
+          <div class="eff-row">
+            <select id="evKind">
+              <option value="none">없음(평범)</option>
+              <option value="ban_op">연산 금지</option>
+              <option value="start_bonus">시작 점수 보너스</option>
+            </select>
+            <select id="evBanOp" style="display:none">
+              <option value="add">덧셈 금지</option>
+              <option value="sub">뺄셈 금지</option>
+              <option value="mul">곱셈 금지</option>
+              <option value="div">나눗셈 금지</option>
+            </select>
+            <input id="evBonus" type="number" placeholder="보너스 점수" style="display:none;width:120px">
+            <input id="evWeight" type="number" value="1" min="1" max="100" title="가중치">
+            <button id="evAddBtn">추가</button>
+          </div>
+        </div>
+        <div id="evMsg"></div>
+        <div id="evList" style="margin-top:12px"></div>
+      </div>
+    </div>
+
+    <div style="margin-top:16px"><a href="/admin/logout">로그아웃</a></div>
   {% endif %}
 </div>
 <script>
@@ -1700,12 +1923,62 @@ async function addEff(){
 }
 async function toggleEff(id){ await fetch('/api/admin/effects/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}); loadEffects(); }
 async function removeEff(id){ await fetch('/api/admin/effects/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}); loadEffects(); }
+
+const KINDKO={none:'평범',ban_op:'연산 금지',start_bonus:'시작 보너스'};
+const OPKO={add:'덧셈',sub:'뺄셈',mul:'곱셈',div:'나눗셈'};
+function evParamText(e){
+  if(e.kind==='ban_op') return (OPKO[e.param]||e.param)+' 금지';
+  if(e.kind==='start_bonus') return '+'+e.param+'점';
+  return '';
+}
+async function loadEvents(){
+  const r=await fetch('/api/admin/events'); if(!r.ok) return;
+  const d=await r.json();
+  $('#evList').innerHTML=d.events.map(e=>{
+    const title=e.title?esc(e.title):'<span class="muted">(제목 없음)</span>';
+    const desc=e.description?`<div class="reqtime">${esc(e.description)}</div>`:'';
+    const pt=evParamText(e); const ptxt=pt?' · '+pt:'';
+    return `<div class="prow ${e.active?'':'off'}"><span class="nm">${title}${desc}
+      <span class="muted" style="font-size:11px">${KINDKO[e.kind]||e.kind}${ptxt} · 가중치 ${e.weight}</span></span>
+      <button class="appr" onclick="toggleEvt(${e.id})">${e.active?'끄기':'켜기'}</button>
+      <button class="del" onclick="removeEvt(${e.id})">삭제</button></div>`;
+  }).join('') || '<div class="muted">이벤트가 없습니다.</div>';
+}
+function syncEvKind(){
+  const k=$('#evKind').value;
+  $('#evBanOp').style.display = k==='ban_op'?'':'none';
+  $('#evBonus').style.display = k==='start_bonus'?'':'none';
+}
+async function addEvt(){
+  const kind=$('#evKind').value;
+  let param=null;
+  if(kind==='ban_op') param=$('#evBanOp').value;
+  else if(kind==='start_bonus') param=$('#evBonus').value;
+  const body={kind, param, title:$('#evTitle').value.trim(), description:$('#evDesc').value.trim(), weight:$('#evWeight').value||1};
+  $('#evMsg').innerHTML='<div class="muted">추가 중…</div>';
+  const r=await fetch('/api/admin/events/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const d=await r.json();
+  if(!r.ok){ $('#evMsg').innerHTML=`<div class="err">${esc(d.error||'오류')}</div>`; return; }
+  $('#evMsg').innerHTML='<div class="ok">추가됨</div>'; $('#evTitle').value=''; $('#evDesc').value=''; $('#evBonus').value=''; loadEvents();
+}
+async function toggleEvt(id){ await fetch('/api/admin/events/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}); loadEvents(); }
+async function removeEvt(id){ await fetch('/api/admin/events/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}); loadEvents(); }
+
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on')); t.classList.add('on');
+  const a=t.dataset.atab;
+  $('#atab-members').style.display=a==='members'?'':'none';
+  $('#atab-effects').style.display=a==='effects'?'':'none';
+  $('#atab-events').style.display=a==='events'?'':'none';
+}));
 if($('#addBtn')){
   $('#addBtn').addEventListener('click',addPlayer);
   $('#riotId').addEventListener('keydown',e=>{if(e.key==='Enter')addPlayer();});
   $('#refreshBtn').addEventListener('click',refreshAll);
   $('#effAddBtn').addEventListener('click',addEff);
-  loadRequests(); loadList(); loadEffects();
+  $('#evKind').addEventListener('change',syncEvKind);
+  $('#evAddBtn').addEventListener('click',addEvt);
+  loadRequests(); loadList(); loadEffects(); loadEvents();
 }
 </script></body></html>
 """
