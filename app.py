@@ -432,6 +432,7 @@ def _winner(a, b):
 def build_battle(A, B, champs):
     pool1 = load_effects("round1")
     pool2 = load_effects("round2")
+    pool_lucky = load_effects("lucky")
 
     # ---- 라운드 1: 스탯 대결 (1000점 시작, 5전투 누적) ----
     a_score = b_score = 1000
@@ -452,8 +453,8 @@ def build_battle(A, B, champs):
                    "aOperand": aop, "bOperand": bop,
                    "aBefore": ab, "bBefore": bb, "aAfter": a_score, "bAfter": b_score,
                    "lead": _winner(a_score, b_score)})
-    # 5전투: 랜덤 0~9 (양쪽 각각 뽑기, 재미요소로 0 포함)
-    eff = pick_effect(pool1)
+    # 5전투: 랜덤 0~9 (양쪽 각각 뽑기, 재미요소로 0 포함) — 행운의 뽑기 전용 풀
+    eff = pick_effect(pool_lucky)
     op, sym = eff["op"], eff["sym"]
     aop, bop = random.randint(0, 9), random.randint(0, 9)
     ab, bb = a_score, b_score
@@ -795,7 +796,7 @@ def admin_effects_add():
     if op not in SYM:
         return jsonify({"error": "연산을 선택하세요."}), 400
     context = (d.get("context") or "both").strip()
-    if context not in ("both", "round1", "round2"):
+    if context not in ("both", "round1", "round2", "lucky"):
         context = "both"
     label = (d.get("label") or "").strip()[:40]
     title = (d.get("title") or "").strip()[:40]
@@ -1089,6 +1090,16 @@ PAGE = r"""
   .reveal{opacity:0;transform:translateY(8px)}
   .reveal.show{opacity:1;transform:none;transition:opacity .3s, transform .3s}
   .verdict.show{animation:pop .55s both, glowpulse 1.8s .5s ease-in-out infinite}
+  .help{display:inline-block;width:18px;height:18px;line-height:16px;text-align:center;border:1px solid var(--gold);
+    color:var(--gold);border-radius:50%;font-size:12px;cursor:pointer;vertical-align:middle;margin-left:6px}
+  .help:hover{background:var(--gold);color:#1a1204}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.62);display:flex;align-items:center;justify-content:center;z-index:60;padding:20px}
+  .modal-box{background:var(--surface);border:1px solid var(--gold);border-radius:14px;max-width:420px;width:100%;padding:22px;max-height:82vh;overflow:auto}
+  .modal-title{font-family:'Marcellus',serif;font-size:18px;color:var(--gold-bright);margin-bottom:12px}
+  .modal-body{color:var(--text);font-size:13.5px;line-height:1.7}
+  .modal-body b{color:var(--gold-bright)}
+  .modal-body ul{margin:6px 0 6px;padding-left:18px}
+  .modal-body li{margin:3px 0}
   .stamp{display:inline-block;margin:0 6px;font-family:'Marcellus',serif;font-size:12px;letter-spacing:.05em;
     color:var(--gold);border:2px solid var(--gold);border-radius:6px;padding:0 5px;transform:rotate(-12deg);opacity:0}
   .reveal.show .stamp{animation:stampin .4s .12s both}
@@ -1158,6 +1169,13 @@ PAGE = r"""
     </div>
     <button id="cmpBtn" style="width:100%;margin-top:8px">⚔️ 대결 시작</button>
     <div id="cmp-result"></div>
+    <div id="rulesModal" class="modal" style="display:none">
+      <div class="modal-box">
+        <div class="modal-title" id="rulesTitle"></div>
+        <div class="modal-body" id="rulesBody"></div>
+        <button class="modal-close" style="width:100%;margin-top:16px" onclick="closeRules()">닫기</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1393,7 +1411,7 @@ function renderBattle(d){
   </div>`;
 
   // 라운드 1
-  h+=`<div class="round-title reveal">⚔️ ROUND 1 · 스탯 대결</div>`;
+  h+=`<div class="round-title reveal">⚔️ ROUND 1 · 스탯 대결 <span class="help" onclick="showRules('round1')">?</span></div>`;
   R1.battles.forEach(bt=>{
     h+=`<div class="bt reveal" data-sym="${bt.sym}" data-a="${bt.aAfter}" data-b="${bt.bAfter}">
       <div class="bt-lab">${bt.random?'🎲 ':''}${esc(bt.label)}${bt.effTitle?' · <span class="eff" title="'+esc(bt.effDesc||'')+'">'+esc(bt.effTitle)+'</span>':''}</div>
@@ -1405,7 +1423,7 @@ function renderBattle(d){
   h+=`<div class="round-sum reveal">1라운드 최종 ${nf(R1.aFinal)} : ${nf(R1.bFinal)} — ${roundText(R1.winner,A,B,Math.max(R1.aFinal,R1.bFinal),Math.min(R1.aFinal,R1.bFinal))}</div>`;
 
   // 라운드 2
-  h+=`<div class="round-title reveal gap">⚔️ ROUND 2 · 챔피언 대결 (Top 5)</div>`;
+  h+=`<div class="round-title reveal gap">⚔️ ROUND 2 · 챔피언 대결 (Top 5) <span class="help" onclick="showRules('round2')">?</span></div>`;
   if(!R2.battles.length){ h+=`<div class="reveal muted" style="text-align:center;padding:8px">공통으로 비교할 챔피언이 없습니다.</div>`; }
   R2.battles.forEach(c=>{
     const ci=(VERSION&&c.img)?`<img src="${dd('champion/'+c.img+'.png')}">`:'';
@@ -1463,6 +1481,28 @@ function renderBattle(d){
     delay += isBt ? (champ?740:1060) : 340;
   });
 }
+const RULES={
+  round1:{t:'ROUND 1 · 스탯 대결', b:`
+    <ul>
+      <li>두 회원 모두 <b>1000점</b>에서 시작합니다.</li>
+      <li>레벨 → 총 숙련도 → 플레이한 챔피언 → 조회수 → <b>🎲 행운의 뽑기</b> 순으로 <b>5전투</b>를 치르며 점수가 누적됩니다.</li>
+      <li>전투마다 연산자(효과)가 <b>무작위</b>로 뽑혀 양쪽에 적용됩니다.</li>
+      <li>스탯 수치는 자릿수를 모두 더해 <b>0~9로 압축</b>해서 씁니다(밸런스). 나눗셈은 반올림, ÷0은 무효 처리.</li>
+      <li>마지막 행운의 뽑기는 스탯과 무관하게 <b>0~9 랜덤 숫자</b>로 겨룹니다.</li>
+      <li>5전투 후 <b>최종 점수</b>가 높은 쪽이 1라운드 승리.</li>
+    </ul>`},
+  round2:{t:'ROUND 2 · 챔피언 대결', b:`
+    <ul>
+      <li>두 회원의 <b>숙련도 Top 5</b> 챔피언을 합칩니다(겹치면 최소 5, 안 겹치면 최대 10).</li>
+      <li>챔피언마다 두 회원이 <b>각자</b> 자신의 원래 숙련도에 무작위 사칙연산을 적용합니다.</li>
+      <li>결과가 높은 쪽이 그 챔피언 승. <b>이긴 챔피언 수</b>가 많은 회원이 2라운드 승리.</li>
+      <li>관리자가 지정한 <b>후처리 숫자</b> 효과는 여기서 ×9처럼 고정 연산으로 걸립니다.</li>
+    </ul>
+    <div style="margin-top:6px"><b>최종 승자</b> — 1·2라운드 중 더 많이 이긴 쪽이 승리, 1:1이면 무승부입니다.</div>`},
+};
+function showRules(k){ const r=RULES[k]; $('#rulesTitle').textContent=r.t; $('#rulesBody').innerHTML=r.b; $('#rulesModal').style.display='flex'; }
+function closeRules(){ $('#rulesModal').style.display='none'; }
+$('#rulesModal').addEventListener('click', e=>{ if(e.target.id==='rulesModal') closeRules(); });
 $('#cmpBtn').addEventListener('click', runBattle);
 
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
@@ -1551,6 +1591,7 @@ ADMIN_PAGE = r"""
             <option value="both">전체 라운드</option>
             <option value="round1">1라운드</option>
             <option value="round2">2라운드</option>
+            <option value="lucky">행운의 뽑기</option>
           </select>
           <input id="effOperand" type="number" min="0" max="9" placeholder="후처리 숫자" title="2라운드 전용, 비우면 랜덤">
           <input id="effWeight" type="number" value="1" min="1" max="100" title="가중치">
@@ -1632,7 +1673,7 @@ async function rejectReq(id){
   await fetch('/api/admin/reject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
   loadRequests();
 }
-const CTXKO={both:'전체',round1:'1R',round2:'2R'};
+const CTXKO={both:'전체',round1:'1R',round2:'2R',lucky:'🎲행운'};
 async function loadEffects(){
   const r=await fetch('/api/admin/effects'); if(!r.ok) return;
   const d=await r.json();
