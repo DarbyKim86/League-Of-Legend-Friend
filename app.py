@@ -96,6 +96,27 @@ def init_db():
                 );
             """)
             cur.execute("CREATE TABLE IF NOT EXISTS app_meta (k TEXT PRIMARY KEY, v TIMESTAMPTZ);")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS battle_effects (
+                    id       SERIAL PRIMARY KEY,
+                    context  TEXT NOT NULL DEFAULT 'both',   -- 'round1' | 'round2' | 'both'
+                    label    TEXT NOT NULL DEFAULT '',       -- 화면 표시 문구(비우면 기호만)
+                    op       TEXT NOT NULL,                  -- 'add','sub','mul','div'
+                    symbol   TEXT NOT NULL,                  -- 표시 기호
+                    weight   INT  NOT NULL DEFAULT 1,        -- 뽑힐 가중치(클수록 자주)
+                    active   BOOLEAN NOT NULL DEFAULT true
+                );
+            """)
+            cur.execute("""
+                INSERT INTO battle_effects (context, label, op, symbol, weight)
+                SELECT * FROM (VALUES
+                    ('both','','add','+',1),
+                    ('both','','sub','−',1),
+                    ('both','','mul','×',1),
+                    ('both','','div','÷',1)
+                ) v(context,label,op,symbol,weight)
+                WHERE NOT EXISTS (SELECT 1 FROM battle_effects);
+            """)
     finally:
         conn.close()
 
@@ -345,6 +366,39 @@ def api_compare():
 
 # ---------- 로그라이크 전투 엔진 ----------
 OPS = [("add", "+"), ("sub", "−"), ("mul", "×"), ("div", "÷")]
+SYM = {"add": "+", "sub": "−", "mul": "×", "div": "÷"}
+
+
+def load_effects(context):
+    """DB battle_effects에서 활성 효과를 로드. 실패/빈 경우 코드 기본값으로 폴백."""
+    pool = []
+    try:
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""SELECT op, symbol, label, weight FROM battle_effects
+                               WHERE active AND weight > 0
+                                 AND (context = %s OR context = 'both')""", (context,))
+                pool = [{"op": r["op"], "sym": r["symbol"], "label": r["label"] or "",
+                         "w": int(r["weight"])} for r in cur.fetchall()]
+        finally:
+            conn.close()
+    except Exception as e:
+        print("load_effects 실패:", e)
+    if not pool:
+        pool = [{"op": o, "sym": s, "label": "", "w": 1} for o, s in OPS]
+    return pool
+
+
+def pick_effect(pool):
+    total = sum(e["w"] for e in pool)
+    r = random.uniform(0, total)
+    acc = 0
+    for e in pool:
+        acc += e["w"]
+        if r <= acc:
+            return e
+    return pool[-1]
 
 
 def digital_root(n):
@@ -372,6 +426,9 @@ def _winner(a, b):
 
 
 def build_battle(A, B, champs):
+    pool1 = load_effects("round1")
+    pool2 = load_effects("round2")
+
     # ---- 라운드 1: 스탯 대결 (1000점 시작, 5전투 누적) ----
     a_score = b_score = 1000
     r1 = []
@@ -382,20 +439,22 @@ def build_battle(A, B, champs):
         ("조회수", A.get("views") or 1, B.get("views") or 1),   # 0은 1로 간주
     ]
     for label, av, bv in stat_defs:
-        op, sym = random.choice(OPS)
+        eff = pick_effect(pool1)
+        op, sym = eff["op"], eff["sym"]
         aop, bop = digital_root(av), digital_root(bv)
         ab, bb = a_score, b_score
         a_score, b_score = apply_op(a_score, op, aop), apply_op(b_score, op, bop)
-        r1.append({"label": label, "op": op, "sym": sym,
+        r1.append({"label": label, "effLabel": eff["label"], "op": op, "sym": sym,
                    "aOperand": aop, "bOperand": bop,
                    "aBefore": ab, "bBefore": bb, "aAfter": a_score, "bAfter": b_score,
                    "lead": _winner(a_score, b_score)})
     # 5전투: 랜덤 0~9 (양쪽 각각 뽑기, 재미요소로 0 포함)
-    op, sym = random.choice(OPS)
+    eff = pick_effect(pool1)
+    op, sym = eff["op"], eff["sym"]
     aop, bop = random.randint(0, 9), random.randint(0, 9)
     ab, bb = a_score, b_score
     a_score, b_score = apply_op(a_score, op, aop), apply_op(b_score, op, bop)
-    r1.append({"label": "행운의 뽑기", "op": op, "sym": sym, "random": True,
+    r1.append({"label": "행운의 뽑기", "effLabel": eff["label"], "op": op, "sym": sym, "random": True,
                "aOperand": aop, "bOperand": bop,
                "aBefore": ab, "bBefore": bb, "aAfter": a_score, "bAfter": b_score,
                "lead": _winner(a_score, b_score)})
@@ -406,19 +465,21 @@ def build_battle(A, B, champs):
     r2 = []
     aw = bw = 0
     for c in champs:
-        a_op, a_sym = random.choice(OPS)
+        ea = pick_effect(pool2)
         a_operand = random.randint(0, 9)
-        b_op, b_sym = random.choice(OPS)
+        eb = pick_effect(pool2)
         b_operand = random.randint(0, 9)
-        a_res = apply_op(c["aM"], a_op, a_operand)
-        b_res = apply_op(c["bM"], b_op, b_operand)
+        a_res = apply_op(c["aM"], ea["op"], a_operand)
+        b_res = apply_op(c["bM"], eb["op"], b_operand)
         w = _winner(a_res, b_res)
         if w == "a":
             aw += 1
         elif w == "b":
             bw += 1
         r2.append({"championId": c["championId"], "name": c["name"], "img": c["img"],
-                   "aSym": a_sym, "bSym": b_sym, "aBase": c["aM"], "bBase": c["bM"],
+                   "aSym": ea["sym"], "bSym": eb["sym"],
+                   "aEff": ea["label"], "bEff": eb["label"],
+                   "aBase": c["aM"], "bBase": c["bM"],
                    "aOperand": a_operand, "bOperand": b_operand,
                    "aScore": a_res, "bScore": b_res, "winner": w})
     round2 = {"battles": r2, "aWins": aw, "bWins": bw, "winner": _winner(aw, bw)}
@@ -705,6 +766,71 @@ def admin_reject():
     return jsonify({"ok": True})
 
 
+# ---------- 전투 효과 관리 ----------
+@app.route("/api/admin/effects")
+@admin_required
+def admin_effects():
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT id, context, label, op, symbol, weight, active FROM battle_effects ORDER BY id")
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return jsonify({"effects": rows})
+
+
+@app.route("/api/admin/effects/add", methods=["POST"])
+@admin_required
+def admin_effects_add():
+    d = request.json or {}
+    op = (d.get("op") or "").strip()
+    if op not in SYM:
+        return jsonify({"error": "연산을 선택하세요."}), 400
+    context = (d.get("context") or "both").strip()
+    if context not in ("both", "round1", "round2"):
+        context = "both"
+    label = (d.get("label") or "").strip()[:40]
+    try:
+        weight = max(1, min(100, int(d.get("weight", 1))))
+    except (ValueError, TypeError):
+        weight = 1
+    conn = get_db()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("""INSERT INTO battle_effects (context, label, op, symbol, weight)
+                           VALUES (%s, %s, %s, %s, %s)""", (context, label, op, SYM[op], weight))
+    finally:
+        conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/admin/effects/toggle", methods=["POST"])
+@admin_required
+def admin_effects_toggle():
+    eid = (request.json or {}).get("id")
+    conn = get_db()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("UPDATE battle_effects SET active = NOT active WHERE id = %s", (eid,))
+    finally:
+        conn.close()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/admin/effects/remove", methods=["POST"])
+@admin_required
+def admin_effects_remove():
+    eid = (request.json or {}).get("id")
+    conn = get_db()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM battle_effects WHERE id = %s", (eid,))
+    finally:
+        conn.close()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/admin/remove", methods=["POST"])
 @admin_required
 def admin_remove():
@@ -912,6 +1038,7 @@ PAGE = r"""
   .scoreboard .sb.lead .sb-val{color:#fff;text-shadow:0 0 14px rgba(200,170,110,.75)}
   .bt-math .op{display:inline-block;min-width:14px;text-align:center;color:var(--gold);font-weight:700}
   .bt-math .op.locked{animation:oplock .28s}
+  .eff{color:var(--gold-bright);font-size:11px;background:rgba(200,170,110,.14);border-radius:5px;padding:0 5px}
   @keyframes oplock{0%{transform:scale(1.7);color:#fff}100%{transform:scale(1);color:var(--gold)}}
   .bt{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:7px;background:var(--surface)}
   .bt-lab{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12.5px;margin-bottom:6px}
@@ -1254,7 +1381,7 @@ function renderBattle(d){
   h+=`<div class="round-title reveal">⚔️ ROUND 1 · 스탯 대결</div>`;
   R1.battles.forEach(bt=>{
     h+=`<div class="bt reveal" data-sym="${bt.sym}" data-a="${bt.aAfter}" data-b="${bt.bAfter}">
-      <div class="bt-lab">${bt.random?'🎲 ':''}${esc(bt.label)}</div>
+      <div class="bt-lab">${bt.random?'🎲 ':''}${esc(bt.label)}${bt.effLabel?' · <span class="eff">'+esc(bt.effLabel)+'</span>':''}</div>
       <div class="bt-math">
         <span class="m a">${nf(bt.aBefore)} <span class="op">?</span> ${bt.aOperand} = <b>?</b></span>
         <span class="m b">${nf(bt.bBefore)} <span class="op">?</span> ${bt.bOperand} = <b>?</b></span>
@@ -1270,8 +1397,8 @@ function renderBattle(d){
     h+=`<div class="bt champ reveal" data-asym="${c.aSym}" data-bsym="${c.bSym}" data-win="${c.winner}">
       <div class="bt-lab">${ci}<span>${esc(c.name)}</span></div>
       <div class="bt-math">
-        <span class="m a">${nf(c.aBase)} <span class="op">?</span> ${c.aOperand} = <b data-to="${c.aScore}">?</b></span>
-        <span class="m b">${nf(c.bBase)} <span class="op">?</span> ${c.bOperand} = <b data-to="${c.bScore}">?</b></span>
+        <span class="m a">${nf(c.aBase)} <span class="op">?</span> ${c.aOperand} = <b data-to="${c.aScore}">?</b>${c.aEff?' <span class="eff">'+esc(c.aEff)+'</span>':''}</span>
+        <span class="m b">${nf(c.bBase)} <span class="op">?</span> ${c.bOperand} = <b data-to="${c.bScore}">?</b>${c.bEff?' <span class="eff">'+esc(c.bEff)+'</span>':''}</span>
       </div></div>`;
   });
   h+=`<div class="round-sum reveal">2라운드 — ${roundText(R2.winner,A,B,R2.aWins,R2.bWins)}</div>`;
@@ -1358,6 +1485,11 @@ ADMIN_PAGE = r"""
   .reqhdr{font-family:'Marcellus',serif;font-size:16px;margin:0 2px 8px}
   .reqhdr .badge{font-family:'Inter';font-size:12px;color:#1a1204;background:var(--gold);border-radius:99px;padding:0 7px;margin-left:6px}
   .reqtime{color:var(--muted);font-size:11px}
+  .eff-form{display:flex;flex-wrap:wrap;gap:6px}
+  .eff-form select,.eff-form input{padding:9px 10px}
+  .eff-form #effLabel{flex:1;min-width:140px}
+  .eff-form #effWeight{width:64px}
+  .prow.off{opacity:.45}
   .refresh{background:transparent;border:1px solid var(--blue);color:var(--blue)}
   .refresh:hover{background:var(--blue);color:#fff}
   .err{color:#E9A2AD;font-size:13px;margin-top:8px}
@@ -1386,6 +1518,27 @@ ADMIN_PAGE = r"""
       <div id="reqList" style="margin-top:16px"></div>
       <div id="list" style="margin-top:16px"></div>
       <div style="margin-top:16px"><a href="/admin/logout">로그아웃</a></div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="reqhdr">전투 효과 관리</div>
+      <div class="eff-form">
+        <select id="effOp">
+          <option value="add">덧셈 +</option>
+          <option value="sub">뺄셈 −</option>
+          <option value="mul">곱셈 ×</option>
+          <option value="div">나눗셈 ÷</option>
+        </select>
+        <select id="effCtx">
+          <option value="both">전체 라운드</option>
+          <option value="round1">1라운드</option>
+          <option value="round2">2라운드</option>
+        </select>
+        <input id="effLabel" placeholder="표시 문구 (예: 운명의 곱셈)" autocomplete="off">
+        <input id="effWeight" type="number" value="1" min="1" max="100" title="가중치">
+        <button id="effAddBtn">추가</button>
+      </div>
+      <div id="effMsg"></div>
+      <div id="effList" style="margin-top:12px"></div>
     </div>
   {% endif %}
 </div>
@@ -1459,11 +1612,34 @@ async function rejectReq(id){
   await fetch('/api/admin/reject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
   loadRequests();
 }
+const CTXKO={both:'전체',round1:'1R',round2:'2R'};
+async function loadEffects(){
+  const r=await fetch('/api/admin/effects'); if(!r.ok) return;
+  const d=await r.json();
+  $('#effList').innerHTML=d.effects.map(e=>{
+    const lab=e.label?esc(e.label):'<span class="muted">(기호만)</span>';
+    return `<div class="prow ${e.active?'':'off'}"><span class="nm"><b>${e.symbol}</b> ${lab}
+      <span class="muted" style="font-size:11px"> · ${CTXKO[e.context]||e.context} · 가중치 ${e.weight}</span></span>
+      <button class="appr" onclick="toggleEff(${e.id})">${e.active?'끄기':'켜기'}</button>
+      <button class="del" onclick="removeEff(${e.id})">삭제</button></div>`;
+  }).join('') || '<div class="muted">효과가 없습니다.</div>';
+}
+async function addEff(){
+  const body={op:$('#effOp').value, context:$('#effCtx').value, label:$('#effLabel').value.trim(), weight:$('#effWeight').value||1};
+  $('#effMsg').innerHTML='<div class="muted">추가 중…</div>';
+  const r=await fetch('/api/admin/effects/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const d=await r.json();
+  if(!r.ok){ $('#effMsg').innerHTML=`<div class="err">${esc(d.error||'오류')}</div>`; return; }
+  $('#effMsg').innerHTML='<div class="ok">추가됨</div>'; $('#effLabel').value=''; loadEffects();
+}
+async function toggleEff(id){ await fetch('/api/admin/effects/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}); loadEffects(); }
+async function removeEff(id){ await fetch('/api/admin/effects/remove',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}); loadEffects(); }
 if($('#addBtn')){
   $('#addBtn').addEventListener('click',addPlayer);
   $('#riotId').addEventListener('keydown',e=>{if(e.key==='Enter')addPlayer();});
   $('#refreshBtn').addEventListener('click',refreshAll);
-  loadRequests(); loadList();
+  $('#effAddBtn').addEventListener('click',addEff);
+  loadRequests(); loadList(); loadEffects();
 }
 </script></body></html>
 """
