@@ -1308,7 +1308,7 @@ PAGE = r"""
     <div class="tab on" data-tab="members">회원 리스트</div>
     <div class="tab" data-tab="mastery">챔피언 숙련도</div>
     <div class="tab" data-tab="ranking">랭킹</div>
-    <div class="tab" data-tab="compare">비교</div>
+    <div class="tab" data-tab="compare">결투</div>
   </div>
   <div class="updated" id="updated"></div>
 
