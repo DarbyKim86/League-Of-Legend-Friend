@@ -301,14 +301,16 @@ def api_compare():
                 p = cur.fetchone()
                 if not p:
                     return jsonify({"error": "회원을 찾을 수 없습니다."}), 404
-                cur.execute("SELECT COALESCE(SUM(points),0) AS total FROM mastery WHERE player_id = %s", (pid,))
-                total = int(cur.fetchone()["total"])
+                cur.execute("SELECT COALESCE(SUM(points),0) AS total, COUNT(*) AS cnt FROM mastery WHERE player_id = %s", (pid,))
+                srow = cur.fetchone()
+                total, cnt = int(srow["total"]), int(srow["cnt"])
                 cur.execute("""SELECT champion_id FROM mastery WHERE player_id = %s
                                ORDER BY points DESC LIMIT 5""", (pid,))
                 top_ids = [r["champion_id"] for r in cur.fetchall()]
                 side[key] = {"name": p["game_name"], "tag": p["tag_line"],
                              "level": p["summoner_level"], "iconId": p["profile_icon_id"],
-                             "views": p["view_count"] or 0, "total": total, "_top": top_ids}
+                             "views": p["view_count"] or 0, "total": total,
+                             "champCount": cnt, "_top": top_ids}
 
             union_ids = list(set(side["a"]["_top"]) | set(side["b"]["_top"]))
 
@@ -825,7 +827,20 @@ PAGE = r"""
   .faceoff .right{animation:slideR .5s both}
   .reveal{opacity:0;transform:translateY(8px)}
   .reveal.show{opacity:1;transform:none;transition:opacity .3s, transform .3s}
-  .verdict.show{animation:pop .55s both}
+  .verdict.show{animation:pop .55s both, glowpulse 1.8s .5s ease-in-out infinite}
+  .stamp{display:inline-block;margin:0 6px;font-family:'Marcellus',serif;font-size:12px;letter-spacing:.05em;
+    color:var(--gold);border:2px solid var(--gold);border-radius:6px;padding:0 5px;transform:rotate(-12deg);opacity:0}
+  .reveal.show .side.win .stamp{animation:stampin .4s .12s both}
+  @keyframes stampin{0%{opacity:0;transform:rotate(-12deg) scale(2.4)}70%{opacity:1;transform:rotate(-12deg) scale(.9)}100%{opacity:1;transform:rotate(-12deg) scale(1)}}
+  @keyframes glowpulse{0%,100%{box-shadow:0 0 0 rgba(200,170,110,0)}50%{box-shadow:0 0 28px rgba(200,170,110,.55)}}
+  .verdict{position:relative;overflow:hidden}
+  .verdict::after{content:'';position:absolute;top:0;left:-60%;width:45%;height:100%;
+    background:linear-gradient(100deg,transparent,rgba(228,213,168,.38),transparent);transform:skewX(-20deg)}
+  .verdict.show::after{animation:shine 1.8s .6s ease-in-out infinite}
+  @keyframes shine{0%{left:-60%}55%,100%{left:130%}}
+  .spark{position:absolute;font-size:14px;opacity:0;pointer-events:none}
+  .verdict.show .spark{animation:tw 1.5s ease-in-out infinite}
+  @keyframes tw{0%,100%{opacity:0;transform:scale(.5)}50%{opacity:1;transform:scale(1.15)}}
 </style></head><body>
 <div class="wrap">
   <div class="eyebrow">League of Legends</div>
@@ -1072,11 +1087,15 @@ function sumText(aw,bw,A,B){
   return `무승부 (${aw} : ${bw})`;
 }
 
+function sideHtml(cls, val, win){
+  return `<div class="side ${cls} ${win?'win':''}"><span class="val">${nf(val)}</span>${win?'<span class="stamp">WIN</span>':''}</div>`;
+}
 function renderBattle(d){
   const A=d.a, B=d.b;
   const stats=[
     {lab:'레벨', a:A.level||0, b:B.level||0},
     {lab:'총 숙련도', a:A.total||0, b:B.total||0},
+    {lab:'보유 챔피언', a:A.champCount||0, b:B.champCount||0},
     {lab:'조회수', a:A.views||0, b:B.views||0},
   ];
   let aw=0,bw=0;
@@ -1093,31 +1112,34 @@ function renderBattle(d){
   </div>`;
   h+=`<div class="round-title reveal">⚔️ ROUND 1 · 스탯 대결</div>`;
   stats.forEach(s=>{
-    h+=`<div class="duel reveal">
-      <div class="side a ${s.w==='a'?'win':''}"><span class="val">${nf(s.a)}</span></div>
-      <div class="lab">${s.lab}</div>
-      <div class="side b ${s.w==='b'?'win':''}"><span class="val">${nf(s.b)}</span></div></div>`;
+    h+=`<div class="duel reveal">${sideHtml('a',s.a,s.w==='a')}<div class="lab">${s.lab}</div>${sideHtml('b',s.b,s.w==='b')}</div>`;
   });
   h+=`<div class="round-sum reveal">1라운드 — ${sumText(aw,bw,A,B)}</div>`;
-  h+=`<div class="round-title reveal">⚔️ ROUND 2 · 챔피언 대결 (Top 5)</div>`;
+  h+=`<div class="round-title reveal gap">⚔️ ROUND 2 · 챔피언 대결 (Top 5)</div>`;
   if(!champs.length){ h+=`<div class="reveal muted" style="text-align:center;padding:8px">공통으로 비교할 챔피언이 없습니다.</div>`; }
   champs.forEach(c=>{
     const ci=(VERSION&&c.img)?`<img src="${dd('champion/'+c.img+'.png')}">`:'';
-    h+=`<div class="duel reveal">
-      <div class="side a ${c.w==='a'?'win':''}"><span class="val">${nf(c.a)}</span></div>
-      <div class="lab champ-lab">${ci}<span>${esc(c.name)}</span></div>
-      <div class="side b ${c.w==='b'?'win':''}"><span class="val">${nf(c.b)}</span></div></div>`;
+    h+=`<div class="duel reveal">${sideHtml('a',c.a,c.w==='a')}<div class="lab champ-lab">${ci}<span>${esc(c.name)}</span></div>${sideHtml('b',c.b,c.w==='b')}</div>`;
   });
   h+=`<div class="round-sum reveal">2라운드 — ${sumText(ca,cb,A,B)}</div>`;
-  let verdict;
-  if(tA>tB) verdict=`🏆<span class="who">${esc(A.name)} 승리!</span>`;
-  else if(tB>tA) verdict=`🏆<span class="who">${esc(B.name)} 승리!</span>`;
-  else verdict=`🤝<span class="who">무승부!</span>`;
-  h+=`<div class="verdict reveal">${verdict}<div class="score">종합 ${tA} : ${tB}</div></div>`;
+  let who;
+  if(tA>tB) who=`🏆<span class="who">${esc(A.name)} 승리!</span>`;
+  else if(tB>tA) who=`🏆<span class="who">${esc(B.name)} 승리!</span>`;
+  else who=`🤝<span class="who">무승부!</span>`;
+  const sparks=`<span class="spark" style="top:14%;left:8%;animation-delay:0s">✨</span>
+    <span class="spark" style="top:22%;right:10%;animation-delay:.4s">✨</span>
+    <span class="spark" style="bottom:16%;left:16%;animation-delay:.8s">✨</span>
+    <span class="spark" style="bottom:20%;right:14%;animation-delay:.6s">⭐</span>`;
+  h+=`<div class="verdict reveal gap">${sparks}${who}<div class="score">종합 ${tA} : ${tB}</div></div>`;
 
   $('#cmp-result').innerHTML=h;
   const els=[...document.querySelectorAll('#cmp-result .reveal')];
-  els.forEach((el,i)=> setTimeout(()=>el.classList.add('show'), 250+i*220));
+  let delay=250;
+  els.forEach(el=>{
+    if(el.classList.contains('gap')) delay+=1000;   // 라운드 전환 시 1초 텀
+    setTimeout(()=>el.classList.add('show'), delay);
+    delay+=220;
+  });
 }
 $('#cmpBtn').addEventListener('click', runBattle);
 
