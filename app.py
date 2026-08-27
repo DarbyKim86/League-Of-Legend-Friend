@@ -284,6 +284,56 @@ def api_member(pid):
     })
 
 
+@app.route("/api/compare")
+def api_compare():
+    a = request.args.get("a", type=int)
+    b = request.args.get("b", type=int)
+    if not a or not b or a == b:
+        return jsonify({"error": "서로 다른 두 회원을 선택하세요."}), 400
+    dd = safe_ddragon()
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            side = {}
+            for key, pid in (("a", a), ("b", b)):
+                cur.execute("""SELECT game_name, tag_line, summoner_level, profile_icon_id, view_count
+                               FROM players WHERE id = %s""", (pid,))
+                p = cur.fetchone()
+                if not p:
+                    return jsonify({"error": "회원을 찾을 수 없습니다."}), 404
+                cur.execute("SELECT COALESCE(SUM(points),0) AS total FROM mastery WHERE player_id = %s", (pid,))
+                total = int(cur.fetchone()["total"])
+                cur.execute("""SELECT champion_id FROM mastery WHERE player_id = %s
+                               ORDER BY points DESC LIMIT 5""", (pid,))
+                top_ids = [r["champion_id"] for r in cur.fetchall()]
+                side[key] = {"name": p["game_name"], "tag": p["tag_line"],
+                             "level": p["summoner_level"], "iconId": p["profile_icon_id"],
+                             "views": p["view_count"] or 0, "total": total, "_top": top_ids}
+
+            union_ids = list(set(side["a"]["_top"]) | set(side["b"]["_top"]))
+
+            def points_on(pid):
+                if not union_ids:
+                    return {}
+                cur.execute("""SELECT champion_id, points FROM mastery
+                               WHERE player_id = %s AND champion_id = ANY(%s)""", (pid, union_ids))
+                return {r["champion_id"]: r["points"] for r in cur.fetchall()}
+            pa, pb = points_on(a), points_on(b)
+    finally:
+        conn.close()
+
+    champs = []
+    for cid in union_ids:
+        info = dd["champions"].get(cid, {})
+        champs.append({"championId": cid, "name": info.get("name", str(cid)),
+                       "img": info.get("id"), "a": pa.get(cid, 0), "b": pb.get(cid, 0)})
+    champs.sort(key=lambda c: c["a"] + c["b"], reverse=True)
+    champs = champs[:14]
+    for s in (side["a"], side["b"]):
+        s.pop("_top", None)
+    return jsonify({"version": dd["version"], "a": side["a"], "b": side["b"], "champions": champs})
+
+
 @app.route("/api/champion-top")
 def api_champion_top():
     dd = safe_ddragon()
@@ -745,6 +795,37 @@ PAGE = r"""
   .rk-card.open .rk-row.extra{display:flex}
   .rk-caret{margin-left:auto;color:var(--muted);font-size:12px;transition:transform .15s}
   .rk-card.open .rk-caret{transform:rotate(180deg)}
+  .cmp-pick{display:flex;gap:8px;align-items:center}
+  .cmp-pick select{flex:1;min-width:0}
+  .cmp-pick .vsm{font-family:'Marcellus',serif;color:var(--gold)}
+  .faceoff{display:flex;align-items:center;justify-content:space-between;margin:20px 0 4px}
+  .faceoff .fighter{flex:1;text-align:center;min-width:0}
+  .faceoff img{width:64px;height:64px;border-radius:14px;border:1px solid var(--line)}
+  .faceoff .fn{margin-top:6px;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .faceoff .vs-big{font-family:'Marcellus',serif;font-size:26px;color:var(--gold);padding:0 8px}
+  .round-title{text-align:center;font-family:'Marcellus',serif;font-size:16px;color:var(--gold);margin:20px 0 10px}
+  .duel{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:7px;background:var(--surface)}
+  .duel .side{min-width:0}
+  .duel .side.a{text-align:right}
+  .duel .side.b{text-align:left}
+  .duel .val{font-family:'JetBrains Mono',monospace;font-size:15px}
+  .duel .side.win .val{color:var(--gold-bright);text-shadow:0 0 12px rgba(200,170,110,.6);font-weight:700}
+  .duel .lab{color:var(--muted);font-size:12px;text-align:center;white-space:nowrap}
+  .duel .champ-lab{display:flex;align-items:center;gap:6px;justify-content:center;color:var(--text)}
+  .duel .champ-lab img{width:24px;height:24px;border-radius:5px}
+  .round-sum{text-align:center;color:var(--muted);font-size:13px;margin:2px 0 6px}
+  .round-sum b{color:var(--gold-bright)}
+  .verdict{text-align:center;margin-top:20px;padding:20px;border-radius:14px;border:1px solid var(--gold);background:rgba(200,170,110,.10)}
+  .verdict .who{font-family:'Marcellus',serif;font-size:26px;color:var(--gold-bright);display:block;margin:4px 0}
+  .verdict .score{color:var(--muted);font-size:13px;margin-top:4px}
+  @keyframes slideL{from{opacity:0;transform:translateX(-24px)}to{opacity:1;transform:none}}
+  @keyframes slideR{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:none}}
+  @keyframes pop{0%{opacity:0;transform:scale(.85)}60%{transform:scale(1.05)}100%{opacity:1;transform:scale(1)}}
+  .faceoff .left{animation:slideL .5s both}
+  .faceoff .right{animation:slideR .5s both}
+  .reveal{opacity:0;transform:translateY(8px)}
+  .reveal.show{opacity:1;transform:none;transition:opacity .3s, transform .3s}
+  .verdict.show{animation:pop .55s both}
 </style></head><body>
 <div class="wrap">
   <div class="eyebrow">League of Legends</div>
@@ -761,6 +842,7 @@ PAGE = r"""
     <div class="tab on" data-tab="members">회원 리스트</div>
     <div class="tab" data-tab="mastery">챔피언 숙련도</div>
     <div class="tab" data-tab="ranking">랭킹</div>
+    <div class="tab" data-tab="compare">비교</div>
   </div>
   <div class="updated" id="updated"></div>
 
@@ -790,6 +872,16 @@ PAGE = r"""
 
   <div id="view-ranking" style="display:none">
     <div id="ranking-list"><div class="muted" style="text-align:center;padding:16px">불러오는 중…</div></div>
+  </div>
+
+  <div id="view-compare" style="display:none">
+    <div class="cmp-pick">
+      <select id="cmpA"></select>
+      <span class="vsm">VS</span>
+      <select id="cmpB"></select>
+    </div>
+    <button id="cmpBtn" style="width:100%;margin-top:8px">⚔️ 대결 시작</button>
+    <div id="cmp-result"></div>
   </div>
 </div>
 
@@ -951,6 +1043,84 @@ async function loadRanking(){
 }
 
 $('#search').addEventListener('input', e=>renderChamps(e.target.value));
+
+function populateCompare(){
+  if(!MEMBERS.length) return;
+  const sorted=MEMBERS.slice().sort((a,b)=>a.name.localeCompare(b.name,'ko'));
+  const opts='<option value="">회원 선택…</option>'+sorted.map(m=>`<option value="${m.id}">${esc(m.name)} #${esc(m.tag)}</option>`).join('');
+  if($('#cmpA').options.length<=1){ $('#cmpA').innerHTML=opts; $('#cmpB').innerHTML=opts; }
+}
+const nf=n=>(n==null?0:n).toLocaleString();
+
+async function runBattle(){
+  const a=$('#cmpA').value, b=$('#cmpB').value;
+  const box=$('#cmp-result');
+  if(!a||!b){ box.innerHTML='<div class="norec" style="text-align:center;padding:12px">두 회원을 선택하세요.</div>'; return; }
+  if(a===b){ box.innerHTML='<div class="norec" style="text-align:center;padding:12px">서로 다른 회원을 선택하세요.</div>'; return; }
+  box.innerHTML='<div class="muted" style="text-align:center;padding:16px">대결 준비 중…</div>';
+  try{
+    const r=await fetch(`/api/compare?a=${a}&b=${b}`); const d=await r.json();
+    if(!r.ok){ box.innerHTML=`<div class="norec" style="text-align:center;padding:12px">${esc(d.error||'오류')}</div>`; return; }
+    VERSION=d.version||VERSION; renderBattle(d);
+  }catch(e){ box.innerHTML='<div class="norec" style="text-align:center;padding:12px">불러오기 실패</div>'; }
+}
+
+function fico(P){ return (VERSION&&P.iconId!=null)?`<img src="${dd('profileicon/'+P.iconId+'.png')}">`:'<div class="icon"></div>'; }
+function sumText(aw,bw,A,B){
+  if(aw>bw) return `<b>${esc(A.name)}</b> 우세 (${aw} : ${bw})`;
+  if(bw>aw) return `<b>${esc(B.name)}</b> 우세 (${bw} : ${aw})`;
+  return `무승부 (${aw} : ${bw})`;
+}
+
+function renderBattle(d){
+  const A=d.a, B=d.b;
+  const stats=[
+    {lab:'레벨', a:A.level||0, b:B.level||0},
+    {lab:'총 숙련도', a:A.total||0, b:B.total||0},
+    {lab:'조회수', a:A.views||0, b:B.views||0},
+  ];
+  let aw=0,bw=0;
+  stats.forEach(s=>{ s.w=s.a>s.b?'a':(s.b>s.a?'b':''); if(s.w==='a')aw++; else if(s.w==='b')bw++; });
+  const champs=d.champions||[];
+  let ca=0,cb=0;
+  champs.forEach(c=>{ c.w=c.a>c.b?'a':(c.b>c.a?'b':''); if(c.w==='a')ca++; else if(c.w==='b')cb++; });
+  const tA=aw+ca, tB=bw+cb;
+
+  let h=`<div class="faceoff">
+    <div class="fighter left">${fico(A)}<div class="fn">${esc(A.name)}</div></div>
+    <div class="vs-big">VS</div>
+    <div class="fighter right">${fico(B)}<div class="fn">${esc(B.name)}</div></div>
+  </div>`;
+  h+=`<div class="round-title reveal">⚔️ ROUND 1 · 스탯 대결</div>`;
+  stats.forEach(s=>{
+    h+=`<div class="duel reveal">
+      <div class="side a ${s.w==='a'?'win':''}"><span class="val">${nf(s.a)}</span></div>
+      <div class="lab">${s.lab}</div>
+      <div class="side b ${s.w==='b'?'win':''}"><span class="val">${nf(s.b)}</span></div></div>`;
+  });
+  h+=`<div class="round-sum reveal">1라운드 — ${sumText(aw,bw,A,B)}</div>`;
+  h+=`<div class="round-title reveal">⚔️ ROUND 2 · 챔피언 대결 (Top 5)</div>`;
+  if(!champs.length){ h+=`<div class="reveal muted" style="text-align:center;padding:8px">공통으로 비교할 챔피언이 없습니다.</div>`; }
+  champs.forEach(c=>{
+    const ci=(VERSION&&c.img)?`<img src="${dd('champion/'+c.img+'.png')}">`:'';
+    h+=`<div class="duel reveal">
+      <div class="side a ${c.w==='a'?'win':''}"><span class="val">${nf(c.a)}</span></div>
+      <div class="lab champ-lab">${ci}<span>${esc(c.name)}</span></div>
+      <div class="side b ${c.w==='b'?'win':''}"><span class="val">${nf(c.b)}</span></div></div>`;
+  });
+  h+=`<div class="round-sum reveal">2라운드 — ${sumText(ca,cb,A,B)}</div>`;
+  let verdict;
+  if(tA>tB) verdict=`🏆<span class="who">${esc(A.name)} 승리!</span>`;
+  else if(tB>tA) verdict=`🏆<span class="who">${esc(B.name)} 승리!</span>`;
+  else verdict=`🤝<span class="who">무승부!</span>`;
+  h+=`<div class="verdict reveal">${verdict}<div class="score">종합 ${tA} : ${tB}</div></div>`;
+
+  $('#cmp-result').innerHTML=h;
+  const els=[...document.querySelectorAll('#cmp-result .reveal')];
+  els.forEach((el,i)=> setTimeout(()=>el.classList.add('show'), 250+i*220));
+}
+$('#cmpBtn').addEventListener('click', runBattle);
+
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on')); t.classList.add('on');
   backToList(); backToMembers();
@@ -958,7 +1128,9 @@ document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
   $('#view-members').style.display = tab==='members'?'':'none';
   $('#view-mastery').style.display = tab==='mastery'?'':'none';
   $('#view-ranking').style.display = tab==='ranking'?'':'none';
+  $('#view-compare').style.display = tab==='compare'?'':'none';
   if(tab==='ranking' && !RANK_LOADED){ RANK_LOADED=true; loadRanking(); }
+  if(tab==='compare') populateCompare();
 }));
 
 loadMembers(); loadChamps();
