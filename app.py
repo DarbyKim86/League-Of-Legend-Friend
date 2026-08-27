@@ -929,6 +929,11 @@ function renderMembers(){
     name:(a,b)=>a.name.localeCompare(b.name,'ko'),
   }[sort]||((a,b)=>0);
   list.sort(cmp);
+  const rightVal=(m)=>{
+    if(sort==='total') return `${(m.total||0).toLocaleString()} <small>숙련도</small>`;
+    if(sort==='views') return `${(m.views||0).toLocaleString()} <small>조회</small>`;
+    return `${m.level??'-'} <small>레벨</small>`;   // 레벨순·이름순
+  };
   if(!list.length){ $('#member-list').innerHTML='<div class="muted" style="text-align:center;padding:24px">'+(q?'검색 결과가 없습니다.':'등록된 회원이 없습니다.')+'</div>'; return; }
   $('#member-list').innerHTML=list.map((m,i)=>{
     const icon=(VERSION&&m.iconId!=null)?`<img class="icon" src="${dd('profileicon/'+m.iconId+'.png')}">`:`<div class="icon"></div>`;
@@ -937,7 +942,7 @@ function renderMembers(){
     const pop=m.popular?` <span class="pop" title="조회 ${m.views}회">🔥 인기쟁이</span>`:'';
     return `<div class="row clickable" onclick="showMemberDetail(${m.id})"><div class="no">${i+1}</div>${icon}
       <div class="who"><div class="nm">${esc(m.name)} <span class="sm">#${esc(m.tag)}</span>${pop}</div>${mini}</div>
-      <div class="lvl">${m.level??'-'} <small>레벨</small></div></div>`;
+      <div class="lvl">${rightVal(m)}</div></div>`;
   }).join('');
 }
 
