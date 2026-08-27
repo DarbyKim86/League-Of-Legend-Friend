@@ -961,7 +961,7 @@ async function showMemberDetail(pid){
     h+=`</div>`;
     h+=`<div class="stats">
         <div class="stat"><div class="s-val">${d.total.toLocaleString()}</div><div class="s-lab">총 숙련도</div></div>
-        <div class="stat"><div class="s-val">${d.champCount}</div><div class="s-lab">보유 챔피언</div></div>
+        <div class="stat"><div class="s-val">${d.champCount}</div><div class="s-lab">플레이한 챔피언</div></div>
         <div class="stat"><div class="s-val">${d.level??'-'}</div><div class="s-lab">레벨</div></div>
       </div>`;
     if(!d.champions.length){ h+='<div class="muted" style="text-align:center;padding:12px">숙련도 기록이 없습니다. 관리자 갱신이 필요할 수 있어요.</div>'; }
@@ -1100,7 +1100,7 @@ function renderBattle(d){
   const stats=[
     {lab:'레벨', a:A.level||0, b:B.level||0},
     {lab:'총 숙련도', a:A.total||0, b:B.total||0},
-    {lab:'보유 챔피언', a:A.champCount||0, b:B.champCount||0},
+    {lab:'플레이한 챔피언', a:A.champCount||0, b:B.champCount||0},
     {lab:'조회수', a:A.views||0, b:B.views||0},
   ];
   let aw=0,bw=0;
