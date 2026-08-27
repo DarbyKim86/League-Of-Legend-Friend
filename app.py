@@ -905,6 +905,10 @@ PAGE = r"""
   .scoreboard .sb-col{color:var(--muted)}
   .sb-val.bump{animation:bump .3s}
   @keyframes bump{0%{transform:scale(1)}40%{transform:scale(1.25);color:#fff}100%{transform:scale(1)}}
+  .scoreboard .sb.lead .sb-val{color:#fff;text-shadow:0 0 14px rgba(200,170,110,.75)}
+  .bt-math .op{display:inline-block;min-width:14px;text-align:center;color:var(--gold);font-weight:700}
+  .bt-math .op.locked{animation:oplock .28s}
+  @keyframes oplock{0%{transform:scale(1.7);color:#fff}100%{transform:scale(1);color:var(--gold)}}
   .bt{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:7px;background:var(--surface)}
   .bt-lab{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12.5px;margin-bottom:6px}
   .bt-lab img{width:22px;height:22px;border-radius:5px}
@@ -923,8 +927,11 @@ PAGE = r"""
   .duel .lab{color:var(--muted);font-size:12px;text-align:center;white-space:nowrap}
   .duel .champ-lab{display:flex;align-items:center;gap:6px;justify-content:center;color:var(--text)}
   .duel .champ-lab img{width:24px;height:24px;border-radius:5px}
-  .round-sum{text-align:center;color:var(--muted);font-size:13px;margin:2px 0 6px}
+  .round-sum{text-align:center;color:var(--muted);font-size:13px;margin:6px 0 6px;
+    background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:8px}
   .round-sum b{color:var(--gold-bright)}
+  .round-sum.show{animation:cutin .5s both}
+  @keyframes cutin{0%{opacity:0;transform:translateX(-26px)}60%{transform:translateX(5px)}100%{opacity:1;transform:none}}
   .verdict{text-align:center;margin-top:20px;padding:20px;border-radius:14px;border:1px solid var(--gold);background:rgba(200,170,110,.10)}
   .verdict .who{font-family:'Marcellus',serif;font-size:26px;color:var(--gold-bright);display:block;margin:4px 0}
   .verdict .score{color:var(--muted);font-size:13px;margin-top:4px}
@@ -1199,6 +1206,29 @@ function roundText(w,A,B,aw,bw){
   if(w==='b') return `<b>${esc(B.name)}</b> 승리 (${bw} : ${aw})`;
   return `무승부 (${aw} : ${bw})`;
 }
+function spinOp(el, finalSym, dur){
+  const syms=['+','−','×','÷']; const start=performance.now();
+  (function tick(){
+    if(performance.now()-start>=dur){ el.textContent=finalSym; el.classList.add('locked'); return; }
+    el.textContent=syms[(Math.random()*4)|0]; setTimeout(tick,55);
+  })();
+}
+function countTo(el, to, dur, from){
+  from=(from==null)?(parseInt((el.textContent||'0').replace(/[^\d-]/g,''))||0):from;
+  const start=performance.now();
+  (function tick(now){
+    const t=Math.min(1,(now-start)/dur);
+    el.textContent=Math.round(from+(to-from)*t).toLocaleString();
+    if(t<1) requestAnimationFrame(tick);
+  })(start);
+}
+function markLead(el){
+  const win = el.dataset.win!==undefined ? el.dataset.win
+            : ((+el.dataset.a > +el.dataset.b) ? 'a' : ((+el.dataset.b > +el.dataset.a) ? 'b' : ''));
+  if(!win) return;
+  const m=el.querySelector('.bt-math .m.'+win);
+  if(m){ m.classList.add('lead'); if(el.classList.contains('champ')) m.insertAdjacentHTML('beforeend','<span class="stamp">WIN</span>'); }
+}
 
 function renderBattle(d){
   const A=d.a, B=d.b, R1=d.round1, R2=d.round2;
@@ -1219,27 +1249,25 @@ function renderBattle(d){
   // 라운드 1
   h+=`<div class="round-title reveal">⚔️ ROUND 1 · 스탯 대결</div>`;
   R1.battles.forEach(bt=>{
-    const aWin=bt.lead==='a', bWin=bt.lead==='b';
-    h+=`<div class="bt reveal" data-a="${bt.aAfter}" data-b="${bt.bAfter}">
-      <div class="bt-lab">${bt.random?'🎲 ':''}${esc(bt.label)} <span class="op-chip">${bt.sym}</span></div>
+    h+=`<div class="bt reveal" data-sym="${bt.sym}" data-a="${bt.aAfter}" data-b="${bt.bAfter}">
+      <div class="bt-lab">${bt.random?'🎲 ':''}${esc(bt.label)}</div>
       <div class="bt-math">
-        <span class="m a ${aWin?'lead':''}">${nf(bt.aBefore)} ${bt.sym} ${bt.aOperand} = <b>${nf(bt.aAfter)}</b></span>
-        <span class="m b ${bWin?'lead':''}">${nf(bt.bBefore)} ${bt.sym} ${bt.bOperand} = <b>${nf(bt.bAfter)}</b></span>
+        <span class="m a">${nf(bt.aBefore)} <span class="op">?</span> ${bt.aOperand} = <b>?</b></span>
+        <span class="m b">${nf(bt.bBefore)} <span class="op">?</span> ${bt.bOperand} = <b>?</b></span>
       </div></div>`;
   });
-  h+=`<div class="round-sum reveal">1라운드 최종 ${nf(R1.aFinal)} : ${nf(R1.bFinal)} — ${roundText(R1.winner,A,B,R1.aFinal>=R1.bFinal?R1.aFinal:R1.bFinal, R1.aFinal>=R1.bFinal?R1.bFinal:R1.aFinal)}</div>`;
+  h+=`<div class="round-sum reveal">1라운드 최종 ${nf(R1.aFinal)} : ${nf(R1.bFinal)} — ${roundText(R1.winner,A,B,Math.max(R1.aFinal,R1.bFinal),Math.min(R1.aFinal,R1.bFinal))}</div>`;
 
   // 라운드 2
   h+=`<div class="round-title reveal gap">⚔️ ROUND 2 · 챔피언 대결 (Top 5)</div>`;
   if(!R2.battles.length){ h+=`<div class="reveal muted" style="text-align:center;padding:8px">공통으로 비교할 챔피언이 없습니다.</div>`; }
   R2.battles.forEach(c=>{
     const ci=(VERSION&&c.img)?`<img src="${dd('champion/'+c.img+'.png')}">`:'';
-    const aWin=c.winner==='a', bWin=c.winner==='b';
-    h+=`<div class="bt champ reveal">
-      <div class="bt-lab">${ci}<span>${esc(c.name)}</span> <span class="op-chip">${c.sym}</span></div>
+    h+=`<div class="bt champ reveal" data-sym="${c.sym}" data-win="${c.winner}">
+      <div class="bt-lab">${ci}<span>${esc(c.name)}</span></div>
       <div class="bt-math">
-        <span class="m a ${aWin?'lead':''}">100 ${c.sym} ${c.aOperand} = <b>${nf(c.aScore)}</b>${aWin?'<span class="stamp">WIN</span>':''}</span>
-        <span class="m b ${bWin?'lead':''}">100 ${c.sym} ${c.bOperand} = <b>${nf(c.bScore)}</b>${bWin?'<span class="stamp">WIN</span>':''}</span>
+        <span class="m a">100 <span class="op">?</span> ${c.aOperand} = <b data-to="${c.aScore}">?</b></span>
+        <span class="m b">100 <span class="op">?</span> ${c.bOperand} = <b data-to="${c.bScore}">?</b></span>
       </div></div>`;
   });
   h+=`<div class="round-sum reveal">2라운드 — ${roundText(R2.winner,A,B,R2.aWins,R2.bWins)}</div>`;
@@ -1257,20 +1285,34 @@ function renderBattle(d){
   h+=`<div class="verdict reveal gap">${sparks}${who}<div class="score">라운드 획득 ${ra} : ${rb}</div></div>`;
 
   $('#cmp-result').innerHTML=h;
+  const sbA=$('#sbA'), sbB=$('#sbB');
+  let prevA=1000, prevB=1000;
+  const setLead=(na,nb)=>{ $('.scoreboard .sb.a').classList.toggle('lead',na>nb); $('.scoreboard .sb.b').classList.toggle('lead',nb>na); };
+
   const els=[...document.querySelectorAll('#cmp-result .reveal')];
   let delay=250;
   els.forEach(el=>{
     if(el.classList.contains('gap')) delay+=1000;
+    const isBt=el.classList.contains('bt'), champ=el.classList.contains('champ');
     setTimeout(()=>{
       el.classList.add('show');
-      if(el.dataset.a!==undefined){
-        $('#sbA').textContent=(+el.dataset.a).toLocaleString();
-        $('#sbB').textContent=(+el.dataset.b).toLocaleString();
-        $('#sbA').classList.remove('bump'); void $('#sbA').offsetWidth; $('#sbA').classList.add('bump');
-        $('#sbB').classList.remove('bump'); void $('#sbB').offsetWidth; $('#sbB').classList.add('bump');
+      if(isBt){
+        const sym=el.dataset.sym, spin=champ?380:460;
+        el.querySelectorAll('.op').forEach(o=>spinOp(o,sym,spin));
+        setTimeout(()=>{
+          const bs=el.querySelectorAll('.bt-math b');
+          if(champ){ bs.forEach(b=>countTo(b,+b.dataset.to,420,100)); }
+          else{
+            const na=+el.dataset.a, nb=+el.dataset.b;
+            bs[0].textContent=na.toLocaleString(); bs[1].textContent=nb.toLocaleString();
+            countTo(sbA,na,560,prevA); countTo(sbB,nb,560,prevB); setLead(na,nb);
+            prevA=na; prevB=nb;
+          }
+          markLead(el);
+        }, spin+30);
       }
     }, delay);
-    delay += el.classList.contains('bt') ? 650 : 320;   // 전투는 좀 더 천천히
+    delay += isBt ? (champ?740:1060) : 340;
   });
 }
 $('#cmpBtn').addEventListener('click', runBattle);
