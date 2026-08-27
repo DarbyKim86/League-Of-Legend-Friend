@@ -1227,6 +1227,12 @@ PAGE = r"""
   .bt-math .op{display:inline-block;min-width:14px;text-align:center;color:var(--gold);font-weight:700}
   .bt-math .op.locked{animation:oplock .28s}
   .eff{color:var(--gold-bright);font-size:11px;background:rgba(200,170,110,.14);border-radius:5px;padding:0 5px}
+  .bt-effs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px}
+  .bt-effs.one{grid-template-columns:1fr;text-align:center}
+  .bt-effs .el.a{text-align:left}
+  .bt-effs .el.b{text-align:right}
+  .eff-line{display:inline-block;font-size:11px;color:var(--gold-bright);background:rgba(200,170,110,.12);border-radius:6px;padding:2px 8px;line-height:1.55}
+  .eff-line b{color:var(--gold-bright)}
   @keyframes oplock{0%{transform:scale(1.7);color:#fff}100%{transform:scale(1);color:var(--gold)}}
   .bt{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:7px;background:var(--surface)}
   .bt-lab{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12.5px;margin-bottom:6px}
@@ -1590,11 +1596,13 @@ function renderBattle(d){
   R1.battles.forEach(bt=>{
     const un=UNARY.includes(bt.op);
     h+=`<div class="bt reveal" data-sym="${bt.sym}" data-a="${bt.aAfter}" data-b="${bt.bAfter}">
-      <div class="bt-lab">${bt.random?'🎲 ':''}${esc(bt.label)}${bt.effTitle?' · <span class="eff" title="'+esc(bt.effDesc||'')+'">'+esc(bt.effTitle)+'</span>':''}</div>
+      <div class="bt-lab">${bt.random?'🎲 ':''}${esc(bt.label)}</div>
       <div class="bt-math">
         <span class="m a">${nf(bt.aBefore)} <span class="op">?</span>${un?'':' '+bt.aOperand} = <b>?</b></span>
         <span class="m b">${nf(bt.bBefore)} <span class="op">?</span>${un?'':' '+bt.bOperand} = <b>?</b></span>
-      </div></div>`;
+      </div>
+      ${bt.effTitle?`<div class="bt-effs one"><span class="eff-line">🎭 <b>${esc(bt.effTitle)}</b>${bt.effDesc?' — '+esc(bt.effDesc):''}</span></div>`:''}
+    </div>`;
   });
   h+=`<div class="round-sum reveal">1라운드 최종 ${nf(R1.aFinal)} : ${nf(R1.bFinal)} — ${roundText(R1.winner,A,B,Math.max(R1.aFinal,R1.bFinal),Math.min(R1.aFinal,R1.bFinal))}</div>`;
 
@@ -1607,9 +1615,14 @@ function renderBattle(d){
     h+=`<div class="bt champ reveal" data-asym="${c.aSym}" data-bsym="${c.bSym}" data-win="${c.winner}">
       <div class="bt-lab">${ci}<span>${esc(c.name)}</span></div>
       <div class="bt-math">
-        <span class="m a">${nf(c.aBase)} <span class="op">?</span>${ua?'':' '+c.aOperand} = <b data-to="${c.aScore}">?</b>${c.aTitle?' <span class="eff" title="'+esc(c.aDesc||'')+'">'+esc(c.aTitle)+'</span>':''}</span>
-        <span class="m b">${nf(c.bBase)} <span class="op">?</span>${ub?'':' '+c.bOperand} = <b data-to="${c.bScore}">?</b>${c.bTitle?' <span class="eff" title="'+esc(c.bDesc||'')+'">'+esc(c.bTitle)+'</span>':''}</span>
-      </div></div>`;
+        <span class="m a">${nf(c.aBase)} <span class="op">?</span>${ua?'':' '+c.aOperand} = <b data-to="${c.aScore}">?</b></span>
+        <span class="m b">${nf(c.bBase)} <span class="op">?</span>${ub?'':' '+c.bOperand} = <b data-to="${c.bScore}">?</b></span>
+      </div>
+      ${(c.aTitle||c.bTitle)?`<div class="bt-effs">
+        <span class="el a">${c.aTitle?'<span class="eff-line">🎭 <b>'+esc(c.aTitle)+'</b>'+(c.aDesc?' — '+esc(c.aDesc):'')+'</span>':''}</span>
+        <span class="el b">${c.bTitle?'<span class="eff-line">🎭 <b>'+esc(c.bTitle)+'</b>'+(c.bDesc?' — '+esc(c.bDesc):'')+'</span>':''}</span>
+      </div>`:''}
+    </div>`;
   });
   h+=`<div class="round-sum reveal">2라운드 — ${roundText(R2.winner,A,B,R2.aWins,R2.bWins)}</div>`;
 
