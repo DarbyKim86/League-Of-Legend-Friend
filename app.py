@@ -402,21 +402,25 @@ def build_battle(A, B, champs):
     round1 = {"start": 1000, "battles": r1, "aFinal": a_score, "bFinal": b_score,
               "winner": _winner(a_score, b_score)}
 
-    # ---- 라운드 2: 챔피언 대결 (각 챔피언마다 슬롯 연산) ----
+    # ---- 라운드 2: 챔피언 대결 (원 숙련도 기준, 각 회원 각자 랜덤 사칙연산) ----
     r2 = []
     aw = bw = 0
     for c in champs:
-        op, sym = random.choice(OPS)
-        aop, bop = digital_root(c["aM"]), digital_root(c["bM"])
-        a_res, b_res = apply_op(100, op, aop), apply_op(100, op, bop)
+        a_op, a_sym = random.choice(OPS)
+        a_operand = random.randint(0, 9)
+        b_op, b_sym = random.choice(OPS)
+        b_operand = random.randint(0, 9)
+        a_res = apply_op(c["aM"], a_op, a_operand)
+        b_res = apply_op(c["bM"], b_op, b_operand)
         w = _winner(a_res, b_res)
         if w == "a":
             aw += 1
         elif w == "b":
             bw += 1
         r2.append({"championId": c["championId"], "name": c["name"], "img": c["img"],
-                   "op": op, "sym": sym, "aOperand": aop, "bOperand": bop,
-                   "aM": c["aM"], "bM": c["bM"], "aScore": a_res, "bScore": b_res, "winner": w})
+                   "aSym": a_sym, "bSym": b_sym, "aBase": c["aM"], "bBase": c["bM"],
+                   "aOperand": a_operand, "bOperand": b_operand,
+                   "aScore": a_res, "bScore": b_res, "winner": w})
     round2 = {"battles": r2, "aWins": aw, "bWins": bw, "winner": _winner(aw, bw)}
 
     # ---- 최종: 두 라운드 중 더 많이 이긴 쪽 ----
@@ -1263,11 +1267,11 @@ function renderBattle(d){
   if(!R2.battles.length){ h+=`<div class="reveal muted" style="text-align:center;padding:8px">공통으로 비교할 챔피언이 없습니다.</div>`; }
   R2.battles.forEach(c=>{
     const ci=(VERSION&&c.img)?`<img src="${dd('champion/'+c.img+'.png')}">`:'';
-    h+=`<div class="bt champ reveal" data-sym="${c.sym}" data-win="${c.winner}">
+    h+=`<div class="bt champ reveal" data-asym="${c.aSym}" data-bsym="${c.bSym}" data-win="${c.winner}">
       <div class="bt-lab">${ci}<span>${esc(c.name)}</span></div>
       <div class="bt-math">
-        <span class="m a">100 <span class="op">?</span> ${c.aOperand} = <b data-to="${c.aScore}">?</b></span>
-        <span class="m b">100 <span class="op">?</span> ${c.bOperand} = <b data-to="${c.bScore}">?</b></span>
+        <span class="m a">${nf(c.aBase)} <span class="op">?</span> ${c.aOperand} = <b data-to="${c.aScore}">?</b></span>
+        <span class="m b">${nf(c.bBase)} <span class="op">?</span> ${c.bOperand} = <b data-to="${c.bScore}">?</b></span>
       </div></div>`;
   });
   h+=`<div class="round-sum reveal">2라운드 — ${roundText(R2.winner,A,B,R2.aWins,R2.bWins)}</div>`;
@@ -1297,11 +1301,13 @@ function renderBattle(d){
     setTimeout(()=>{
       el.classList.add('show');
       if(isBt){
-        const sym=el.dataset.sym, spin=champ?380:460;
-        el.querySelectorAll('.op').forEach(o=>spinOp(o,sym,spin));
+        const spin=champ?380:460;
+        const ops=el.querySelectorAll('.op');
+        if(champ){ spinOp(ops[0],el.dataset.asym,spin); spinOp(ops[1],el.dataset.bsym,spin); }
+        else{ ops.forEach(o=>spinOp(o,el.dataset.sym,spin)); }
         setTimeout(()=>{
           const bs=el.querySelectorAll('.bt-math b');
-          if(champ){ bs.forEach(b=>countTo(b,+b.dataset.to,420,100)); }
+          if(champ){ bs.forEach(b=>countTo(b,+b.dataset.to,420,0)); }
           else{
             const na=+el.dataset.a, nb=+el.dataset.b;
             bs[0].textContent=na.toLocaleString(); bs[1].textContent=nb.toLocaleString();
