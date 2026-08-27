@@ -16,6 +16,8 @@ Riot API 라우팅:
 
 import os
 import time
+import math
+import random
 import threading
 from functools import wraps
 from urllib.parse import quote
@@ -328,12 +330,100 @@ def api_compare():
     for cid in union_ids:
         info = dd["champions"].get(cid, {})
         champs.append({"championId": cid, "name": info.get("name", str(cid)),
-                       "img": info.get("id"), "a": pa.get(cid, 0), "b": pb.get(cid, 0)})
-    champs.sort(key=lambda c: c["a"] + c["b"], reverse=True)
+                       "img": info.get("id"), "aM": pa.get(cid, 0), "bM": pb.get(cid, 0)})
+    champs.sort(key=lambda c: c["aM"] + c["bM"], reverse=True)
     champs = champs[:14]
     for s in (side["a"], side["b"]):
         s.pop("_top", None)
-    return jsonify({"version": dd["version"], "a": side["a"], "b": side["b"], "champions": champs})
+
+    log = build_battle(side["a"], side["b"], champs)
+    return jsonify({"version": dd["version"],
+                    "a": {k: side["a"][k] for k in ("name", "tag", "iconId")},
+                    "b": {k: side["b"][k] for k in ("name", "tag", "iconId")},
+                    **log})
+
+
+# ---------- 로그라이크 전투 엔진 ----------
+OPS = [("add", "+"), ("sub", "−"), ("mul", "×"), ("div", "÷")]
+
+
+def digital_root(n):
+    """자릿수를 반복해서 더해 한 자리로 (0~9). 밸런스 모드 압축."""
+    n = abs(int(n or 0))
+    return 0 if n == 0 else 1 + (n - 1) % 9
+
+
+def apply_op(score, op, operand):
+    if op == "add":
+        return score + operand
+    if op == "sub":
+        return score - operand
+    if op == "mul":
+        return score * operand
+    if op == "div":
+        if operand == 0:
+            operand = 1                      # ÷0 방어
+        return math.floor(score / operand + 0.5)   # 반올림
+    return score
+
+
+def _winner(a, b):
+    return "a" if a > b else ("b" if b > a else "")
+
+
+def build_battle(A, B, champs):
+    # ---- 라운드 1: 스탯 대결 (1000점 시작, 5전투 누적) ----
+    a_score = b_score = 1000
+    r1 = []
+    stat_defs = [
+        ("레벨", A.get("level") or 0, B.get("level") or 0),
+        ("총 숙련도", A.get("total") or 0, B.get("total") or 0),
+        ("플레이한 챔피언", A.get("champCount") or 0, B.get("champCount") or 0),
+        ("조회수", A.get("views") or 1, B.get("views") or 1),   # 0은 1로 간주
+    ]
+    for label, av, bv in stat_defs:
+        op, sym = random.choice(OPS)
+        aop, bop = digital_root(av), digital_root(bv)
+        ab, bb = a_score, b_score
+        a_score, b_score = apply_op(a_score, op, aop), apply_op(b_score, op, bop)
+        r1.append({"label": label, "op": op, "sym": sym,
+                   "aOperand": aop, "bOperand": bop,
+                   "aBefore": ab, "bBefore": bb, "aAfter": a_score, "bAfter": b_score,
+                   "lead": _winner(a_score, b_score)})
+    # 5전투: 랜덤 0~9 (양쪽 각각 뽑기, 재미요소로 0 포함)
+    op, sym = random.choice(OPS)
+    aop, bop = random.randint(0, 9), random.randint(0, 9)
+    ab, bb = a_score, b_score
+    a_score, b_score = apply_op(a_score, op, aop), apply_op(b_score, op, bop)
+    r1.append({"label": "행운의 뽑기", "op": op, "sym": sym, "random": True,
+               "aOperand": aop, "bOperand": bop,
+               "aBefore": ab, "bBefore": bb, "aAfter": a_score, "bAfter": b_score,
+               "lead": _winner(a_score, b_score)})
+    round1 = {"start": 1000, "battles": r1, "aFinal": a_score, "bFinal": b_score,
+              "winner": _winner(a_score, b_score)}
+
+    # ---- 라운드 2: 챔피언 대결 (각 챔피언마다 슬롯 연산) ----
+    r2 = []
+    aw = bw = 0
+    for c in champs:
+        op, sym = random.choice(OPS)
+        aop, bop = digital_root(c["aM"]), digital_root(c["bM"])
+        a_res, b_res = apply_op(100, op, aop), apply_op(100, op, bop)
+        w = _winner(a_res, b_res)
+        if w == "a":
+            aw += 1
+        elif w == "b":
+            bw += 1
+        r2.append({"championId": c["championId"], "name": c["name"], "img": c["img"],
+                   "op": op, "sym": sym, "aOperand": aop, "bOperand": bop,
+                   "aM": c["aM"], "bM": c["bM"], "aScore": a_res, "bScore": b_res, "winner": w})
+    round2 = {"battles": r2, "aWins": aw, "bWins": bw, "winner": _winner(aw, bw)}
+
+    # ---- 최종: 두 라운드 중 더 많이 이긴 쪽 ----
+    ra = (1 if round1["winner"] == "a" else 0) + (1 if round2["winner"] == "a" else 0)
+    rb = (1 if round1["winner"] == "b" else 0) + (1 if round2["winner"] == "b" else 0)
+    return {"round1": round1, "round2": round2,
+            "roundsWon": {"a": ra, "b": rb}, "overall": _winner(ra, rb)}
 
 
 @app.route("/api/champion-top")
@@ -806,6 +896,24 @@ PAGE = r"""
   .faceoff .fn{margin-top:6px;font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .faceoff .vs-big{font-family:'Marcellus',serif;font-size:26px;color:var(--gold);padding:0 8px}
   .round-title{text-align:center;font-family:'Marcellus',serif;font-size:16px;color:var(--gold);margin:20px 0 10px}
+  .scoreboard{display:flex;align-items:center;justify-content:center;gap:14px;margin:6px 0 4px;
+    background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px}
+  .scoreboard .sb{display:flex;align-items:baseline;gap:8px}
+  .scoreboard .sb.b{flex-direction:row}
+  .scoreboard .sb-nm{color:var(--muted);font-size:12px;max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .scoreboard .sb-val{font-family:'JetBrains Mono',monospace;font-size:22px;color:var(--gold-bright)}
+  .scoreboard .sb-col{color:var(--muted)}
+  .sb-val.bump{animation:bump .3s}
+  @keyframes bump{0%{transform:scale(1)}40%{transform:scale(1.25);color:#fff}100%{transform:scale(1)}}
+  .bt{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:7px;background:var(--surface)}
+  .bt-lab{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12.5px;margin-bottom:6px}
+  .bt-lab img{width:22px;height:22px;border-radius:5px}
+  .op-chip{margin-left:auto;font-family:'JetBrains Mono',monospace;color:var(--gold);border:1px solid var(--gold);border-radius:6px;padding:0 7px;font-size:13px}
+  .bt-math{display:flex;justify-content:space-between;gap:10px;font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--muted)}
+  .bt-math .m{position:relative}
+  .bt-math .m.b{text-align:right}
+  .bt-math .m b{color:var(--text)}
+  .bt-math .m.lead b{color:var(--gold-bright);text-shadow:0 0 10px rgba(200,170,110,.5)}
   .duel{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:7px;background:var(--surface)}
   .duel .side{min-width:0}
   .duel .side.a{text-align:right}
@@ -830,7 +938,7 @@ PAGE = r"""
   .verdict.show{animation:pop .55s both, glowpulse 1.8s .5s ease-in-out infinite}
   .stamp{display:inline-block;margin:0 6px;font-family:'Marcellus',serif;font-size:12px;letter-spacing:.05em;
     color:var(--gold);border:2px solid var(--gold);border-radius:6px;padding:0 5px;transform:rotate(-12deg);opacity:0}
-  .reveal.show .side.win .stamp{animation:stampin .4s .12s both}
+  .reveal.show .stamp{animation:stampin .4s .12s both}
   @keyframes stampin{0%{opacity:0;transform:rotate(-12deg) scale(2.4)}70%{opacity:1;transform:rotate(-12deg) scale(.9)}100%{opacity:1;transform:rotate(-12deg) scale(1)}}
   @keyframes glowpulse{0%,100%{box-shadow:0 0 0 rgba(200,170,110,0)}50%{box-shadow:0 0 28px rgba(200,170,110,.55)}}
   .verdict{position:relative;overflow:hidden}
@@ -1086,64 +1194,83 @@ async function runBattle(){
 }
 
 function fico(P){ return (VERSION&&P.iconId!=null)?`<img src="${dd('profileicon/'+P.iconId+'.png')}">`:'<div class="icon"></div>'; }
-function sumText(aw,bw,A,B){
-  if(aw>bw) return `<b>${esc(A.name)}</b> 우세 (${aw} : ${bw})`;
-  if(bw>aw) return `<b>${esc(B.name)}</b> 우세 (${bw} : ${aw})`;
+function roundText(w,A,B,aw,bw){
+  if(w==='a') return `<b>${esc(A.name)}</b> 승리 (${aw} : ${bw})`;
+  if(w==='b') return `<b>${esc(B.name)}</b> 승리 (${bw} : ${aw})`;
   return `무승부 (${aw} : ${bw})`;
 }
 
-function sideHtml(cls, val, win){
-  return `<div class="side ${cls} ${win?'win':''}"><span class="val">${nf(val)}</span>${win?'<span class="stamp">WIN</span>':''}</div>`;
-}
 function renderBattle(d){
-  const A=d.a, B=d.b;
-  const stats=[
-    {lab:'레벨', a:A.level||0, b:B.level||0},
-    {lab:'총 숙련도', a:A.total||0, b:B.total||0},
-    {lab:'플레이한 챔피언', a:A.champCount||0, b:B.champCount||0},
-    {lab:'조회수', a:A.views||0, b:B.views||0},
-  ];
-  let aw=0,bw=0;
-  stats.forEach(s=>{ s.w=s.a>s.b?'a':(s.b>s.a?'b':''); if(s.w==='a')aw++; else if(s.w==='b')bw++; });
-  const champs=d.champions||[];
-  let ca=0,cb=0;
-  champs.forEach(c=>{ c.w=c.a>c.b?'a':(c.b>c.a?'b':''); if(c.w==='a')ca++; else if(c.w==='b')cb++; });
-  const tA=aw+ca, tB=bw+cb;
+  const A=d.a, B=d.b, R1=d.round1, R2=d.round2;
 
   let h=`<div class="faceoff">
     <div class="fighter left">${fico(A)}<div class="fn">${esc(A.name)}</div></div>
     <div class="vs-big">VS</div>
     <div class="fighter right">${fico(B)}<div class="fn">${esc(B.name)}</div></div>
   </div>`;
+
+  // 실시간 점수판
+  h+=`<div class="scoreboard">
+    <div class="sb a"><span class="sb-nm">${esc(A.name)}</span><span class="sb-val" id="sbA">1000</span></div>
+    <div class="sb-col">:</div>
+    <div class="sb b"><span class="sb-val" id="sbB">1000</span><span class="sb-nm">${esc(B.name)}</span></div>
+  </div>`;
+
+  // 라운드 1
   h+=`<div class="round-title reveal">⚔️ ROUND 1 · 스탯 대결</div>`;
-  stats.forEach(s=>{
-    h+=`<div class="duel reveal">${sideHtml('a',s.a,s.w==='a')}<div class="lab">${s.lab}</div>${sideHtml('b',s.b,s.w==='b')}</div>`;
+  R1.battles.forEach(bt=>{
+    const aWin=bt.lead==='a', bWin=bt.lead==='b';
+    h+=`<div class="bt reveal" data-a="${bt.aAfter}" data-b="${bt.bAfter}">
+      <div class="bt-lab">${bt.random?'🎲 ':''}${esc(bt.label)} <span class="op-chip">${bt.sym}</span></div>
+      <div class="bt-math">
+        <span class="m a ${aWin?'lead':''}">${nf(bt.aBefore)} ${bt.sym} ${bt.aOperand} = <b>${nf(bt.aAfter)}</b></span>
+        <span class="m b ${bWin?'lead':''}">${nf(bt.bBefore)} ${bt.sym} ${bt.bOperand} = <b>${nf(bt.bAfter)}</b></span>
+      </div></div>`;
   });
-  h+=`<div class="round-sum reveal">1라운드 — ${sumText(aw,bw,A,B)}</div>`;
+  h+=`<div class="round-sum reveal">1라운드 최종 ${nf(R1.aFinal)} : ${nf(R1.bFinal)} — ${roundText(R1.winner,A,B,R1.aFinal>=R1.bFinal?R1.aFinal:R1.bFinal, R1.aFinal>=R1.bFinal?R1.bFinal:R1.aFinal)}</div>`;
+
+  // 라운드 2
   h+=`<div class="round-title reveal gap">⚔️ ROUND 2 · 챔피언 대결 (Top 5)</div>`;
-  if(!champs.length){ h+=`<div class="reveal muted" style="text-align:center;padding:8px">공통으로 비교할 챔피언이 없습니다.</div>`; }
-  champs.forEach(c=>{
+  if(!R2.battles.length){ h+=`<div class="reveal muted" style="text-align:center;padding:8px">공통으로 비교할 챔피언이 없습니다.</div>`; }
+  R2.battles.forEach(c=>{
     const ci=(VERSION&&c.img)?`<img src="${dd('champion/'+c.img+'.png')}">`:'';
-    h+=`<div class="duel reveal">${sideHtml('a',c.a,c.w==='a')}<div class="lab champ-lab">${ci}<span>${esc(c.name)}</span></div>${sideHtml('b',c.b,c.w==='b')}</div>`;
+    const aWin=c.winner==='a', bWin=c.winner==='b';
+    h+=`<div class="bt champ reveal">
+      <div class="bt-lab">${ci}<span>${esc(c.name)}</span> <span class="op-chip">${c.sym}</span></div>
+      <div class="bt-math">
+        <span class="m a ${aWin?'lead':''}">100 ${c.sym} ${c.aOperand} = <b>${nf(c.aScore)}</b>${aWin?'<span class="stamp">WIN</span>':''}</span>
+        <span class="m b ${bWin?'lead':''}">100 ${c.sym} ${c.bOperand} = <b>${nf(c.bScore)}</b>${bWin?'<span class="stamp">WIN</span>':''}</span>
+      </div></div>`;
   });
-  h+=`<div class="round-sum reveal">2라운드 — ${sumText(ca,cb,A,B)}</div>`;
+  h+=`<div class="round-sum reveal">2라운드 — ${roundText(R2.winner,A,B,R2.aWins,R2.bWins)}</div>`;
+
+  // 최종
+  const ra=d.roundsWon.a, rb=d.roundsWon.b;
   let who;
-  if(tA>tB) who=`🏆<span class="who">${esc(A.name)} 승리!</span>`;
-  else if(tB>tA) who=`🏆<span class="who">${esc(B.name)} 승리!</span>`;
+  if(d.overall==='a') who=`🏆<span class="who">${esc(A.name)} 승리!</span>`;
+  else if(d.overall==='b') who=`🏆<span class="who">${esc(B.name)} 승리!</span>`;
   else who=`🤝<span class="who">무승부!</span>`;
   const sparks=`<span class="spark" style="top:14%;left:8%;animation-delay:0s">✨</span>
     <span class="spark" style="top:22%;right:10%;animation-delay:.4s">✨</span>
     <span class="spark" style="bottom:16%;left:16%;animation-delay:.8s">✨</span>
     <span class="spark" style="bottom:20%;right:14%;animation-delay:.6s">⭐</span>`;
-  h+=`<div class="verdict reveal gap">${sparks}${who}<div class="score">종합 ${tA} : ${tB}</div></div>`;
+  h+=`<div class="verdict reveal gap">${sparks}${who}<div class="score">라운드 획득 ${ra} : ${rb}</div></div>`;
 
   $('#cmp-result').innerHTML=h;
   const els=[...document.querySelectorAll('#cmp-result .reveal')];
   let delay=250;
   els.forEach(el=>{
-    if(el.classList.contains('gap')) delay+=1000;   // 라운드 전환 시 1초 텀
-    setTimeout(()=>el.classList.add('show'), delay);
-    delay+=220;
+    if(el.classList.contains('gap')) delay+=1000;
+    setTimeout(()=>{
+      el.classList.add('show');
+      if(el.dataset.a!==undefined){
+        $('#sbA').textContent=(+el.dataset.a).toLocaleString();
+        $('#sbB').textContent=(+el.dataset.b).toLocaleString();
+        $('#sbA').classList.remove('bump'); void $('#sbA').offsetWidth; $('#sbA').classList.add('bump');
+        $('#sbB').classList.remove('bump'); void $('#sbB').offsetWidth; $('#sbB').classList.add('bump');
+      }
+    }, delay);
+    delay += el.classList.contains('bt') ? 650 : 320;   // 전투는 좀 더 천천히
   });
 }
 $('#cmpBtn').addEventListener('click', runBattle);
